@@ -25,7 +25,7 @@ jobs:
           docker run --rm --entrypoint python3 -v "$PWD/proof:/proof:ro" -v "$PWD/evidence:/evidence" kestra-link-proof /proof/status_fixture.py 2>&1 | tee evidence/http-fixture.log
       - name: Run final flow in Dockerized Kestra
         run: |
-          export PROOF_PASSWORD="$(openssl rand -hex 24)"
+          export PROOF_PASSWORD="Aa1$(openssl rand -hex 24)"
           echo "::add-mask::$PROOF_PASSWORD"
           docker run -d --name kestra-proof -p 127.0.0.1:18080:8080 -e PROOF_PASSWORD kestra-link-proof
           python3 proof/run_proof.py 2>&1 | tee evidence/runtime-proof.log
