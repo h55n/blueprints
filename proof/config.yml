@@ -1,0 +1,16 @@
+micronaut:
+  server:
+    host: 0.0.0.0
+    port: 8080
+kestra:
+  server:
+    basic-auth:
+      username: proof@local.invalid
+      password: ${PROOF_PASSWORD}
+  storage:
+    type: local
+    local:
+      base-path: /app/storage
+  tasks:
+    tmp-dir:
+      path: /tmp/kestra-work
