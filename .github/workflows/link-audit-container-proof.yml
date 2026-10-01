@@ -1,0 +1,40 @@
+name: Link audit container proof
+on:
+  push:
+    branches:
+      - trial-link-audit-container-proof
+permissions:
+  contents: read
+jobs:
+  proof:
+    if: github.repository == 'h55n/blueprints'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Build bounded test image
+        run: docker build -f proof/Dockerfile -t kestra-link-proof .
+      - name: Run classifier, scope and actual HTTP timeout tests in container
+        run: |
+          mkdir -p evidence
+          docker run --rm --entrypoint python3 -v "$PWD/proof:/proof:ro" kestra-link-proof /proof/test_report.py 2>&1 | tee evidence/classifier-tests.log
+          docker run --rm --entrypoint python3 -v "$PWD/proof:/proof:ro" kestra-link-proof /proof/test_selection.py 2>&1 | tee evidence/selection-tests.log
+          docker run --rm --entrypoint python3 -v "$PWD/proof:/proof:ro" -v "$PWD/evidence:/evidence" kestra-link-proof /proof/status_fixture.py 2>&1 | tee evidence/http-fixture.log
+      - name: Run final flow in Dockerized Kestra
+        run: |
+          export PROOF_PASSWORD="$(openssl rand -hex 24)"
+          echo "::add-mask::$PROOF_PASSWORD"
+          docker run -d --name kestra-proof -p 127.0.0.1:18080:8080 -e PROOF_PASSWORD kestra-link-proof
+          python3 proof/run_proof.py 2>&1 | tee evidence/runtime-proof.log
+      - name: Collect runtime logs and stop container
+        if: always()
+        run: |
+          mkdir -p evidence
+          docker logs kestra-proof > evidence/kestra-server.log 2>&1 || true
+          docker rm -f kestra-proof || true
+      - name: Upload proof
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: link-audit-container-proof
+          path: evidence/
