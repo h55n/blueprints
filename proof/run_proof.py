@@ -7,6 +7,9 @@ def call(path,method='GET',body=None,ctype='application/json'):
     with urllib.request.urlopen(r,timeout=15) as response:return response.read()
 for _ in range(120):
     try:call('/configs');break
+    except urllib.error.HTTPError as exc:
+        if exc.code in (401,403):raise RuntimeError('Kestra rejected proof credentials') from exc
+        time.sleep(2)
     except (urllib.error.URLError,TimeoutError,ConnectionError):time.sleep(2)
 else:raise RuntimeError('Kestra did not become ready')
 flow=pathlib.Path('proof/runtime-flow.yaml').read_bytes()
