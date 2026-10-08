@@ -38,5 +38,7 @@ for name,inputs in [('local-url',{'repository':'file:///tmp/fixture'}),('other-h
     ids=[t['taskId'] for t in d['taskRunList']]
     assert ('clone' not in ids) if name!='empty-scope' else ('report' not in ids)
     negatives.append({'name':name,'id':d['id'],'state':d['state']['current'],'tasks':ids})
+    logs=json.loads(call('/logs/'+d['id']));out.joinpath('negative-logs-'+name+'.json').write_text(json.dumps(logs,indent=2))
+    print('NEGATIVE',name,[(l.get('level'),l.get('taskId'),str(l.get('message'))[:200]) for l in logs if l.get('level') in ('ERROR','WARN')])
 out.joinpath('negative-executions.json').write_text(json.dumps(negatives,indent=2))
 print('Actual Dockerized Kestra execution SUCCESS:',e['id']);print('Four actual negative executions PASS');print(json.dumps(report,indent=2))
