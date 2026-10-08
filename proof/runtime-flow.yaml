@@ -126,13 +126,13 @@ tasks:
 outputs:
 - id: report_json
   type: FILE
-  value: '{{ outputs.report.outputFiles[''link-audit.json''] }}'
+  value: '{{ outputs.report.outputFiles[''link-audit.json''] ?? null }}'
 - id: report_markdown
   type: FILE
-  value: '{{ outputs.report.outputFiles[''link-audit.md''] }}'
+  value: '{{ outputs.report.outputFiles[''link-audit.md''] ?? null }}'
 - id: missing_count
   type: INT
-  value: '{{ outputs.report.vars.missing_count }}'
+  value: '{{ outputs.report.vars.missing_count ?? 0 }}'
 - id: recheck_count
   type: INT
-  value: '{{ outputs.report.vars.recheck_count }}'
+  value: '{{ outputs.report.vars.recheck_count ?? 0 }}'
