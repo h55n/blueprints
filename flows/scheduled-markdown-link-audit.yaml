@@ -140,3 +140,37 @@ outputs:
   type: INT
   required: false
   value: '{{ outputs.report.vars.recheck_count ?? 0 }}'
+extend:
+  shortDescription: Audit external links in Markdown files of a public GitHub repository and save separate reports for HTTP 404/410 results and results that need a recheck.
+  title: Scheduled Markdown external-link audit with lychee
+  metaTitle: Markdown Link Audit for GitHub Repositories in Kestra
+  metaDescription: Check external links in a public GitHub repo's Markdown files with lychee and get reports that separate HTTP 404/410 from results to recheck.
+  description: |
+    Audit the external HTTP(S) links in Markdown files of a public GitHub repository and get two reports: links that returned HTTP 404 or 410, and results that need another check (access errors, rate limits, server errors, timeouts). The flow never changes the repository, never posts issues and never sends notifications.
+
+    ## How it works
+    1. `validate_repository` accepts only public `https://github.com/<owner>/<repo>` URLs and fails before any clone otherwise.
+    2. `clone` makes a checkout without submodules. `scan` selects Markdown files with the `markdown_glob` input (relative glob, at most 50 files, 1 MB each, no symlinks or parent traversal) and runs a pinned lychee with `--config /dev/null`, so the repository's own configuration and code are never executed.
+    3. `report` writes `link-audit.json` and `link-audit.md`. Only 404/410 responses (and missing local files) are listed as links to inspect; 403, 429, 5xx and timeouts go to the recheck list.
+    4. A final `Log` task summarizes the counts.
+
+    ## Prerequisites
+    - Python 3.10+ and lychee 0.24.2 on the worker PATH. The tasks use the `Process` task runner.
+    - Outbound access to the links being checked. No secrets are needed.
+    - The weekly `Schedule` trigger is disabled by default; enable it when you are ready.
+
+    ## Inputs
+    - `repository` (STRING, default `https://github.com/kestra-io/blueprints.git`): public GitHub repository over HTTPS.
+    - `branch` (STRING, default `main`).
+    - `markdown_glob` (STRING, default `README.md`): relative glob of Markdown files to scan.
+
+    ## Outputs
+    - `report_json` and `report_markdown` (FILE, for example `{{ outputs.report.outputFiles['link-audit.md'] }}`), plus `missing_count` and `recheck_count`. On a failed validation or scan the outputs are skipped.
+
+    ## Notes
+    A successful execution means the audit produced its reports, not that every link is valid. Excluded links (local files, email, private IP ranges) are not checked and fragment correctness is not verified. A 404 can also come from a server that hides access restrictions, so inspect before editing links. See the [lychee documentation](https://lychee.cli.rs) and the [Git plugin documentation](https://kestra.io/plugins/plugin-git).
+  tags:
+    - Core
+    - Infrastructure
+  ee: false
+  demo: false

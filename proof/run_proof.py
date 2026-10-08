@@ -12,7 +12,7 @@ for _ in range(120):
         time.sleep(2)
     except (urllib.error.URLError,TimeoutError,ConnectionError):time.sleep(2)
 else:raise RuntimeError('Kestra did not become ready')
-flow=pathlib.Path('proof/runtime-flow.yaml').read_bytes()
+flow=pathlib.Path('flows/scheduled-markdown-link-audit.yaml').read_bytes()
 call('/flows','POST',flow,'application/x-yaml')
 def run(inputs):
     boundary='kestra-proof-boundary'
