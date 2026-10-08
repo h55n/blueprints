@@ -12,8 +12,11 @@ for _ in range(120):
         time.sleep(2)
     except (urllib.error.URLError,TimeoutError,ConnectionError):time.sleep(2)
 else:raise RuntimeError('Kestra did not become ready')
-flow=pathlib.Path('flows/scheduled-markdown-link-audit.yaml').read_bytes()
-call('/flows','POST',flow,'application/x-yaml')
+blueprint=pathlib.Path('flows/scheduled-markdown-link-audit.yaml').read_text()
+import re;ext=blueprint.split('\nextend:\n')[1];md=re.search(r'^  metaDescription: (.+)$',ext,re.M).group(1);assert len(md)<=160 and '\n  ee: false' in ext and '\n  demo: false' in ext
+flow=blueprint.split('\nextend:\n')[0].encode()+b'\n'
+try:call('/flows','POST',flow,'application/x-yaml')
+except urllib.error.HTTPError as exc:raise RuntimeError(exc.read().decode()[:2000]) from exc
 def run(inputs):
     boundary='kestra-proof-boundary'
     data=''.join('--'+boundary+'\r\nContent-Disposition: form-data; name="'+key+'"\r\n\r\n'+value+'\r\n' for key,value in inputs.items())+'--'+boundary+'--\r\n'
