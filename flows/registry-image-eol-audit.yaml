@@ -1,0 +1,484 @@
+id: registry-image-eol-audit
+namespace: company.team
+
+description: >
+  Weekly audit of the container images you ship. Reads each image straight from its registry
+  without pulling it, finds the language runtime and base operating system inside, and checks
+  both against the endoflife.date API. Posts to Slack when an image runs a version that is past
+  end of life, ends soon, was built long ago, or could not be read, and keeps a Markdown table
+  with the version found, where it was found and a suggested upgrade.
+
+inputs:
+  - id: images
+    type: STRING
+    displayName: Images to audit
+    description: One image reference per line, written as in a Dockerfile or deployment. A tag, a digest (repo@sha256:...) or both work, on Docker Hub, GHCR or any registry. Lines starting with # are ignored.
+    defaults: |
+      python:3.9-slim
+      node:18-alpine
+      postgres:13
+      redis:7.2
+      alpine:3.20
+
+  - id: warn_days
+    type: INT
+    displayName: Warning window in days
+    description: Alert when a runtime or OS version reaches end of life within this many days.
+    defaults: 90
+
+  - id: max_image_age_days
+    type: INT
+    displayName: Maximum image age in days
+    description: Alert when an image was built longer ago than this, since it carries no recent security fixes even if its versions are supported. Set 0 to turn the age check off.
+    defaults: 365
+
+  - id: registry_host
+    type: STRING
+    displayName: Registry that needs credentials
+    description: Host of one registry where the images are private, for example ghcr.io. Leave empty when every image is public. Credentials are sent to this host only.
+    defaults: ""
+
+  - id: registry_username
+    type: STRING
+    displayName: Registry username
+    defaults: ""
+
+  - id: registry_password_secret
+    type: STRING
+    displayName: Name of the secret that holds the registry password or token
+    description: The name of a Kestra secret, not the password itself. Leave empty for public images.
+    defaults: ""
+
+tasks:
+  - id: audit_images
+    type: io.kestra.plugin.scripts.python.Script
+    description: >
+      Read each image manifest and config from its registry without pulling the image. The runtime
+      comes from the image environment, the base operating system from the first layer, and any
+      other product from the endoflife.date image list. Each version is classified as EXPIRED,
+      EXPIRING or SUPPORTED, and an image that cannot be read is UNKNOWN, never supported.
+      Python standard library only.
+    containerImage: python:3.12-slim
+    env:
+      REGISTRY_HOST: "{{ inputs.registry_host }}"
+      REGISTRY_USERNAME: "{{ inputs.registry_username }}"
+      REGISTRY_PASSWORD: "{{ inputs.registry_password_secret == '' ? '' : secret(inputs.registry_password_secret) }}"
+    outputFiles:
+      - image-eol-report.md
+    script: |
+      import base64
+      import gzip
+      import json
+      import os
+      import re
+      import tarfile
+      import urllib.error
+      import urllib.parse
+      import urllib.request
+      from datetime import date, datetime
+
+      IMAGES = """{{ inputs.images }}"""
+      WARN_DAYS = int("{{ inputs.warn_days }}")
+      MAX_AGE_DAYS = int("{{ inputs.max_image_age_days }}")
+      AUTH_HOST = os.environ.get("REGISTRY_HOST", "").strip()
+      AUTH_USER = os.environ.get("REGISTRY_USERNAME", "")
+      AUTH_PASS = os.environ.get("REGISTRY_PASSWORD", "")
+      TODAY = date.today()
+      UA = {"User-Agent": "kestra-registry-image-eol-audit"}
+
+      # Runtimes that the official images announce in their environment: variable -> endoflife.date product.
+      ENV_PRODUCTS = {
+          "PYTHON_VERSION": "python",
+          "NODE_VERSION": "nodejs",
+          "GOLANG_VERSION": "go",
+          "RUBY_VERSION": "ruby",
+          "PHP_VERSION": "php",
+          "PG_MAJOR": "postgresql",
+          "REDIS_VERSION": "redis",
+          "NGINX_VERSION": "nginx",
+          "MYSQL_MAJOR": "mysql",
+          "MONGO_MAJOR": "mongodb",
+      }
+      # /etc/os-release ID -> endoflife.date product.
+      OS_PRODUCTS = {
+          "debian": "debian",
+          "ubuntu": "ubuntu",
+          "alpine": "alpine-linux",
+          "amzn": "amazon-linux",
+          "rocky": "rocky-linux",
+          "almalinux": "almalinux",
+      }
+      MANIFEST_TYPES = ", ".join([
+          "application/vnd.oci.image.index.v1+json",
+          "application/vnd.docker.distribution.manifest.list.v2+json",
+          "application/vnd.oci.image.manifest.v1+json",
+          "application/vnd.docker.distribution.manifest.v2+json",
+      ])
+
+
+      class NoRedirect(urllib.request.HTTPRedirectHandler):
+          def redirect_request(self, *args, **kwargs):
+              return None
+
+
+      OPENER = urllib.request.build_opener(NoRedirect)
+
+
+      def fetch(url, headers=None):
+          """GET that follows redirects by hand so credentials never travel to a storage host."""
+          headers = dict(headers or {})
+          for _ in range(5):
+              try:
+                  return OPENER.open(urllib.request.Request(url, headers=headers), timeout=60)
+              except urllib.error.HTTPError as exc:
+                  location = exc.headers.get("Location")
+                  if exc.code in (301, 302, 303, 307, 308) and location:
+                      url = urllib.parse.urljoin(url, location)
+                      headers.pop("Authorization", None)
+                      continue
+                  raise
+          raise RuntimeError("too many redirects")
+
+
+      def parse_ref(ref):
+          name, tag = ref, "latest"
+          if "@" in name:
+              name, tag = name.split("@", 1)
+          else:
+              last = name.rsplit("/", 1)[-1]
+              if ":" in last:
+                  name, tag = name.rsplit(":", 1)
+          if "@" in name:
+              name = name.split("@", 1)[0]
+          parts = name.split("/")
+          if len(parts) > 1 and ("." in parts[0] or ":" in parts[0] or parts[0] == "localhost"):
+              registry, repo = parts[0], "/".join(parts[1:])
+          else:
+              registry, repo = "registry-1.docker.io", name
+          if registry in ("docker.io", "index.docker.io"):
+              registry = "registry-1.docker.io"
+          if registry == "registry-1.docker.io" and "/" not in repo:
+              repo = "library/" + repo
+          return registry, repo, tag
+
+
+      class Registry:
+          def __init__(self, registry, repo):
+              scheme = "http" if registry.startswith(("localhost", "127.0.0.1")) else "https"
+              self.base = f"{scheme}://{registry}/v2/{repo}"
+              self.repo = repo
+              self.registry = registry
+              self.authorization = None
+              self.basic = None
+              wanted = AUTH_HOST.lower().replace("docker.io", "registry-1.docker.io") if AUTH_HOST else ""
+              if AUTH_USER and AUTH_PASS and wanted == registry.lower():
+                  self.basic = "Basic " + base64.b64encode(f"{AUTH_USER}:{AUTH_PASS}".encode()).decode()
+
+          def get(self, path, accept=None):
+              for attempt in (1, 2):
+                  headers = dict(UA)
+                  if accept:
+                      headers["Accept"] = accept
+                  if self.authorization:
+                      headers["Authorization"] = self.authorization
+                  try:
+                      return fetch(self.base + path, headers)
+                  except urllib.error.HTTPError as exc:
+                      if exc.code == 401 and attempt == 1:
+                          self.login(exc.headers.get("WWW-Authenticate", ""))
+                          continue
+                      raise
+
+          def login(self, challenge):
+              if challenge.lower().startswith("basic") and self.basic:
+                  self.authorization = self.basic
+                  return
+              fields = dict(re.findall(r'(\w+)="([^"]*)"', challenge))
+              if "realm" not in fields:
+                  raise RuntimeError("the registry wants credentials and none were given for it")
+              query = "service=" + urllib.parse.quote(fields.get("service", ""))
+              query += "&scope=" + urllib.parse.quote(fields.get("scope", f"repository:{self.repo}:pull"))
+              headers = dict(UA)
+              if self.basic:
+                  headers["Authorization"] = self.basic
+              with fetch(fields["realm"] + "?" + query, headers) as resp:
+                  body = json.load(resp)
+              token = body.get("token") or body.get("access_token")
+              if not token:
+                  raise RuntimeError("the registry did not hand out a pull token")
+              self.authorization = "Bearer " + token
+
+
+      def read_os_release(reg, layer):
+          """Stream the first layer, which holds the base operating system, and stop at os-release."""
+          with reg.get("/blobs/" + layer["digest"]) as resp:
+              stream = gzip.GzipFile(fileobj=resp) if layer["mediaType"].endswith("gzip") else resp
+              with tarfile.open(fileobj=stream, mode="r|*") as tar:
+                  for member in tar:
+                      name = member.name.lstrip("./")
+                      if member.isfile() and name in ("usr/lib/os-release", "etc/os-release"):
+                          return tar.extractfile(member).read().decode("utf-8", "replace")
+          return None
+
+
+      def inspect(ref):
+          registry, repo, tag = parse_ref(ref)
+          reg = Registry(registry, repo)
+          with reg.get("/manifests/" + tag, MANIFEST_TYPES) as resp:
+              manifest = json.load(resp)
+          if "manifests" in manifest:
+              picks = [m for m in manifest["manifests"] if m.get("platform", {}).get("os") == "linux"]
+              pick = next((m for m in picks if m["platform"].get("architecture") == "amd64"), picks[0] if picks else None)
+              if pick is None:
+                  raise RuntimeError("no linux image under this tag")
+              with reg.get("/manifests/" + pick["digest"], MANIFEST_TYPES) as resp:
+                  manifest = json.load(resp)
+          with reg.get("/blobs/" + manifest["config"]["digest"]) as resp:
+              config = json.load(resp)
+          settings = config.get("config") or {}
+          env = dict(e.split("=", 1) for e in settings.get("Env", []) if "=" in e)
+          labels = settings.get("Labels") or {}
+          built = (config.get("created") or "")[:10] or None
+          os_info = {}
+          if manifest.get("layers"):
+              text = read_os_release(reg, manifest["layers"][0])
+              for line in (text or "").splitlines():
+                  if "=" in line:
+                      key, value = line.split("=", 1)
+                      os_info[key] = value.strip().strip('"')
+          return {"registry": registry, "repo": repo, "tag": tag, "env": env, "labels": labels, "built": built, "os": os_info}
+
+
+      # ---- endoflife.date ----
+      _products = {}
+      _docker_products = None
+
+
+      def eol_get(path):
+          with urllib.request.urlopen(urllib.request.Request("https://endoflife.date/api/v1/" + path, headers=UA), timeout=30) as resp:
+              return json.load(resp)
+
+
+      def docker_products():
+          """endoflife.date lists the Docker Hub images of each product as pkg:docker/<namespace>/<image>."""
+          global _docker_products
+          if _docker_products is None:
+              _docker_products = {}
+              for item in eol_get("identifiers/purl")["result"]:
+                  if item["identifier"].startswith("pkg:docker/"):
+                      _docker_products.setdefault(item["identifier"][len("pkg:docker/"):], item["product"]["name"])
+          return _docker_products
+
+
+      def releases(product):
+          if product not in _products:
+              _products[product] = eol_get("products/" + product)["result"]["releases"]
+          return _products[product]
+
+
+      def vtuple(text):
+          return tuple(int(n) for n in re.findall(r"\d+", text)[:4])
+
+
+      def find_release(product, version):
+          """The release line whose name is the longest dot-prefix of the version, such as 3.9 for 3.9.25."""
+          best = None
+          for rel in releases(product):
+              name = rel["name"]
+              if version == name or version.startswith(name + ".") or version.startswith(name + "-"):
+                  if best is None or len(name) > len(best["name"]):
+                      best = rel
+          return best
+
+
+      def classify(rel):
+          eol = rel.get("eolFrom")
+          if eol:
+              days = (datetime.strptime(eol, "%Y-%m-%d").date() - TODAY).days
+              status = "EXPIRED" if days < 0 else "EXPIRING" if days <= WARN_DAYS else "SUPPORTED"
+              return status, eol, days
+          if rel.get("isEol"):
+              return "EXPIRED", "already ended", None
+          return "SUPPORTED", "no end date announced", None
+
+
+      def upgrade_hint(product, rel):
+          """Nearest newer release still supported past the warning window, and the newest release, preferring LTS lines."""
+          current = vtuple(rel["name"])
+          ahead = []
+          for other in releases(product):
+              if vtuple(other["name"]) <= current or other.get("isEol"):
+                  continue
+              if other.get("releaseDate") and other["releaseDate"] > TODAY.isoformat():
+                  continue
+              eol = other.get("eolFrom")
+              if eol and (datetime.strptime(eol, "%Y-%m-%d").date() - TODAY).days <= WARN_DAYS:
+                  continue
+              ahead.append(other)
+          pool = [o for o in ahead if o.get("isLts")] or ahead
+          if not pool:
+              return ""
+
+          def until(o):
+              return "supported until " + o["eolFrom"] if o.get("eolFrom") else "no end date announced"
+
+          near = min(pool, key=lambda o: vtuple(o["name"]))
+          newest = max(pool, key=lambda o: vtuple(o["name"]))
+          if near is newest:
+              return f"move to {near['name']} ({until(near)})"
+          return f"move to {near['name']} ({until(near)}) or newer, up to {newest['name']} ({until(newest)})"
+
+
+      def detect(info):
+          """Collect (product, version, how it was found) from the image itself, never from guesses about the tag alone."""
+          found = {}
+          for key, product in ENV_PRODUCTS.items():
+              if info["env"].get(key):
+                  found.setdefault(product, (info["env"][key], f"image env {key}"))
+          java = info["env"].get("JAVA_VERSION")
+          if java:
+              java = re.sub(r"^jdk-?", "", java)
+              java = re.sub(r"^(\d+)u.*", r"\1", java)
+              for word, product in (("temurin", "eclipse-temurin"), ("corretto", "amazon-corretto")):
+                  if word in info["repo"]:
+                      found.setdefault(product, (java, "image env JAVA_VERSION"))
+          distro = info["os"].get("ID")
+          if distro in OS_PRODUCTS and info["os"].get("VERSION_ID"):
+              found.setdefault(OS_PRODUCTS[distro], (info["os"]["VERSION_ID"], "os-release in base layer"))
+          if info["registry"] == "registry-1.docker.io":
+              product = docker_products().get(info["repo"])
+              if product and product not in found:
+                  label = info["labels"].get("org.opencontainers.image.version")
+                  if label and re.match(r"\d", label):
+                      found[product] = (label, "image label org.opencontainers.image.version")
+                  elif re.match(r"\d", info["tag"]):
+                      found[product] = (info["tag"], "image tag")
+          return found
+
+
+      rows, problems = [], []
+      for line in IMAGES.splitlines():
+          ref = line.strip()
+          if not ref or ref.startswith("#"):
+              continue
+          try:
+              info = inspect(ref)
+              found = detect(info)
+          except Exception as exc:
+              problems.append(f"{ref}: could not read the image ({exc})")
+              rows.append({"image": ref, "component": "image", "version": "", "how": "", "status": "UNKNOWN", "eol": None, "days": None, "hint": "", "built": None})
+              continue
+          if not found:
+              problems.append(f"{ref}: no runtime or operating system version found in the image")
+              rows.append({"image": ref, "component": "image", "version": "", "how": "", "status": "UNKNOWN", "eol": None, "days": None, "hint": "", "built": info["built"]})
+              continue
+          for product, (version, how) in sorted(found.items()):
+              try:
+                  rel = find_release(product, version)
+              except Exception as exc:
+                  rel = None
+                  problems.append(f"{ref}: endoflife.date lookup for {product} failed ({exc})")
+              if rel is None:
+                  if not any(p.startswith(f"{ref}: endoflife.date lookup for {product}") for p in problems):
+                      problems.append(f"{ref}: {product} {version} is not a release line endoflife.date lists")
+                  rows.append({"image": ref, "component": product, "version": version, "how": how, "status": "UNKNOWN", "eol": None, "days": None, "hint": "", "built": info["built"]})
+                  continue
+              status, eol, days = classify(rel)
+              hint = upgrade_hint(product, rel) if status in ("EXPIRED", "EXPIRING") else ""
+              rows.append({"image": ref, "component": product, "version": version, "how": how, "status": status, "eol": eol, "days": days, "hint": hint, "built": info["built"]})
+          if MAX_AGE_DAYS > 0 and info["built"]:
+              age = (TODAY - datetime.strptime(info["built"], "%Y-%m-%d").date()).days
+              if age > MAX_AGE_DAYS:
+                  rows.append({"image": ref, "component": "image build", "version": info["built"], "how": "image config", "status": "STALE", "eol": None, "days": None, "hint": f"built {age} days ago, rebuild on a fresh base", "built": info["built"]})
+
+      order = {"EXPIRED": 0, "EXPIRING": 1, "STALE": 2, "UNKNOWN": 3, "SUPPORTED": 4}
+      rows.sort(key=lambda r: (order[r["status"]], r["image"]))
+      expired = [r for r in rows if r["status"] == "EXPIRED"]
+      expiring = [r for r in rows if r["status"] == "EXPIRING"]
+      stale = [r for r in rows if r["status"] == "STALE"]
+
+      table = ["| Image | Component | Version | Found in | Status | End of life | Days left | Built | Suggested move |", "|---|---|---|---|---|---|---|---|---|"]
+      for r in rows:
+          days = "" if r["days"] is None else str(r["days"])
+          table.append(f"| {r['image']} | {r['component']} | {r['version']} | {r['how']} | {r['status']} | {r['eol'] or ''} | {days} | {r['built'] or ''} | {r['hint']} |")
+      with open("image-eol-report.md", "w") as fh:
+          fh.write("\n".join(table) + "\n")
+
+
+      def say(r):
+          if r["status"] == "STALE":
+              return f"{r['image']}: {r['hint']}"
+          when = f"ended {r['eol']}" if r["status"] == "EXPIRED" and r["days"] is not None else (
+              f"ends {r['eol']}, {r['days']} days left" if r["days"] is not None else r["eol"])
+          tail = f", {r['hint']}" if r["hint"] else ""
+          return f"{r['image']}: {r['component']} {r['version']} ({when}{tail})"
+
+
+      def shorten(items, limit=8):
+          shown = [say(r) if isinstance(r, dict) else r for r in items[:limit]]
+          if len(items) > limit:
+              shown.append(f"and {len(items) - limit} more, see the report")
+          return "; ".join(shown)
+
+
+      summary = []
+      if expired:
+          summary.append("Past end of life: " + shorten(expired))
+      if expiring:
+          summary.append(f"Ending within {WARN_DAYS} days: " + shorten(expiring))
+      if stale:
+          summary.append("Old builds: " + shorten(stale))
+      if problems:
+          summary.append("Could not check: " + shorten(problems))
+      text = " | ".join(summary) if summary else "Every image is on supported runtime and OS versions."
+      text = re.sub(r'[\\"\r\n\t]', "'", text)
+
+      print("::" + json.dumps({"outputs": {
+          "expired": len(expired),
+          "expiring": len(expiring),
+          "stale": len(stale),
+          "unknown": len(problems),
+          "attention": bool(expired or expiring or stale or problems),
+          "summary": text,
+      }}) + "::")
+
+  - id: needs_attention
+    type: io.kestra.plugin.core.flow.If
+    description: Alert only when an image is expired, expiring soon, old, or could not be checked.
+    condition: "{{ outputs.audit_images.vars.attention }}"
+    then:
+      - id: alert_slack
+        type: io.kestra.plugin.slack.notifications.SlackIncomingWebhook
+        description: Send the summary so the alert names the images, versions and dates, not just that something is wrong.
+        url: "{{ secret('SLACK_WEBHOOK_URL') }}"
+        payload: |
+          {
+            "text": ":warning: Container image check - {{ outputs.audit_images.vars.summary }} (execution {{ execution.id }})"
+          }
+    else:
+      - id: log_all_supported
+        type: io.kestra.plugin.core.log.Log
+        description: Record clean weeks too, so the execution history shows the audit kept running.
+        message: "{{ outputs.audit_images.vars.summary }}"
+
+errors:
+  - id: alert_audit_failed
+    type: io.kestra.plugin.slack.notifications.SlackIncomingWebhook
+    description: A failed audit must not look like a clean week.
+    url: "{{ secret('SLACK_WEBHOOK_URL') }}"
+    payload: |
+      {
+        "text": "Container image check FAILED in flow {{ flow.id }} (execution {{ execution.id }}). Check the task logs."
+      }
+
+outputs:
+  - id: report
+    type: FILE
+    description: Markdown table with every image, each runtime and OS found in it, status, end-of-life date, build date and suggested move.
+    value: "{{ outputs.audit_images.outputFiles['image-eol-report.md'] }}"
+
+triggers:
+  - id: weekly_audit
+    type: io.kestra.plugin.core.trigger.Schedule
+    cron: "0 8 * * 1"
+    disabled: true
