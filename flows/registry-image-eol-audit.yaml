@@ -351,10 +351,10 @@ tasks:
               product = docker_products().get(info["repo"])
               if product and product not in found:
                   label = info["labels"].get("org.opencontainers.image.version")
-                  if label and re.match(r"\d", label):
-                      found[product] = (label, "image label org.opencontainers.image.version")
-                  elif re.match(r"\d", info["tag"]):
-                      found[product] = (info["tag"], "image tag")
+                  if label and re.match(r"v?\d", label):
+                      found[product] = (label.lstrip("v"), "image label org.opencontainers.image.version")
+                  elif re.match(r"v?\d", info["tag"]):
+                      found[product] = (info["tag"].lstrip("v"), "image tag")
           return found
 
 
