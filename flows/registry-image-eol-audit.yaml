@@ -190,7 +190,9 @@ tasks:
                       raise
 
           def login(self, challenge):
-              if challenge.lower().startswith("basic") and self.basic:
+              if challenge.lower().startswith("basic"):
+                  if not self.basic:
+                      raise RuntimeError("the registry wants credentials and none were given for it")
                   self.authorization = self.basic
                   return
               fields = dict(re.findall(r'(\w+)="([^"]*)"', challenge))
@@ -482,3 +484,86 @@ triggers:
     type: io.kestra.plugin.core.trigger.Schedule
     cron: "0 8 * * 1"
     disabled: true
+
+extend:
+  title: Find container images that run end-of-life runtimes or operating systems
+  shortDescription: Read the images you ship straight from their registry, find the runtime and base OS inside each one, check them against endoflife.date and alert Slack with a suggested upgrade.
+  metaTitle: Container image end-of-life audit with endoflife.date and Slack
+  metaDescription: Check the runtime and base OS inside your registry images against endoflife.date every week and alert Slack before or after support ends.
+  description: |
+    An image tag can look fine for years after the software inside it lost support. `python:3.9-slim` still pulls, `postgres:13` still starts, and nobody asks which Debian or Alpine sits underneath. Repository scanners only see the Dockerfile you wrote. This blueprint looks at the image itself, as published in the registry, which is what you actually run.
+
+    It does not pull the image. It reads the manifest and the image config over the registry API, then streams just enough of the first layer to read `/etc/os-release`. That is a few HTTP calls per image, so it needs no Docker daemon on the worker and finishes in seconds. Each version it finds is matched to a release line on endoflife.date and marked as expired, expiring, or supported, with the nearest newer release that is still supported.
+
+    ## How it works
+
+    1. `audit_images` (`io.kestra.plugin.scripts.python.Script`) goes through the `images` list. For each image it reads:
+       - the runtime from the image environment: `PYTHON_VERSION`, `NODE_VERSION`, `GOLANG_VERSION`, `RUBY_VERSION`, `PHP_VERSION`, `PG_MAJOR`, `REDIS_VERSION`, `NGINX_VERSION`, `MYSQL_MAJOR`, `MONGO_MAJOR`, and `JAVA_VERSION` for Temurin and Corretto images
+       - the base OS from `/etc/os-release` in the first layer: Debian, Ubuntu, Alpine, Amazon Linux, Rocky and AlmaLinux
+       - for other official Docker Hub images that endoflife.date lists (MariaDB, Caddy, Traefik, WordPress and more), the version from the `org.opencontainers.image.version` label or from the tag
+    2. Each version is matched to the longest release line on endoflife.date (`3.9.25` to Python `3.9`, `18.20.8` to Node.js `18`) and classified as `EXPIRED`, `EXPIRING` (inside `warn_days`) or `SUPPORTED`. For an expired or expiring version the report suggests the nearest newer release that is still supported past the warning window, preferring LTS lines, and the newest one.
+    3. An image built more than `max_image_age_days` ago is flagged `STALE`, even when its versions are supported, because it carries no recent security fixes. This matters most for digest-pinned images, where the build date is the date of exactly what you run.
+    4. An image that cannot be read, or one where no version could be found, is `UNKNOWN`. It is reported, never treated as fine.
+    5. `needs_attention` (`io.kestra.plugin.core.flow.If`) sends the summary to Slack through `alert_slack` when anything is expired, expiring, stale or unknown, and logs a one-line all-clear through `log_all_supported` otherwise.
+    6. The `errors` block posts to Slack if the audit itself fails, so a broken run never looks like a clean week.
+
+    The weekly `Schedule` trigger is shipped disabled. Enable it once a manual run looks right.
+
+    ## What you get
+
+    - A Slack message that names each image, the version found, its end-of-life date and the suggested move, worst first, capped at eight images with a pointer to the full report.
+    - `image-eol-report.md`, a Markdown table of every image with each component found, where it was found (`image env PYTHON_VERSION`, `os-release in base layer`, `image tag`), status, end-of-life date, days left, build date and suggested move.
+    - Flow output `report` with the same table.
+
+    ## Prerequisites
+
+    - A worker that can run Docker containers. The task uses the public `python:3.12-slim` image and only the Python standard library.
+    - Outbound HTTPS to `endoflife.date` and to the registries you list. The endoflife.date API needs no key.
+    - Secret `SLACK_WEBHOOK_URL`: Slack incoming webhook that receives the alerts (required).
+    - Private images only: the name of a Kestra secret that holds a registry password or token. Public images need nothing.
+
+    ## Inputs
+
+    - `images` (STRING): one image reference per line. A tag, a digest (`repo@sha256:...`) or both work, on Docker Hub, GHCR or any registry. Lines starting with `#` are ignored. Default: `python:3.9-slim`, `node:18-alpine`, `postgres:13`, `redis:7.2`, `alpine:3.20`.
+    - `warn_days` (INT, default `90`): alert when a version reaches end of life within this many days.
+    - `max_image_age_days` (INT, default `365`): alert on images built longer ago than this. Set `0` to turn the check off.
+    - `registry_host` (STRING, default empty): the one registry that needs credentials, for example `ghcr.io`. Credentials are sent to this host only, never to the other registries in the list.
+    - `registry_username` (STRING, default empty): username for that registry.
+    - `registry_password_secret` (STRING, default empty): the name of a Kestra secret holding the password or token. The password is read from the secret at run time and never appears in the inputs or the logs.
+
+    ## Quick start
+
+    1. Add the `SLACK_WEBHOOK_URL` secret and save the flow.
+    2. Execute it with the defaults. It reads five public Docker Hub images and posts the findings to Slack. Open the **Outputs** tab and preview `report` for the full table.
+    3. Replace `images` with the images you deploy, copied from your Kubernetes manifests or compose files.
+    4. For a private registry, set `registry_host`, `registry_username` and `registry_password_secret`.
+    5. Enable the `weekly_audit` trigger.
+
+    ## Good to know
+
+    - It reports what the image declares: the environment the image sets, the base OS, the labels and the tag. A runtime that your own build steps install on top of a plain OS image, such as `apt install python3` on Ubuntu, is not visible this way. Such an image shows its OS only. If nothing is found at all, the image is reported as `UNKNOWN`.
+    - Multi-architecture tags are read for `linux/amd64`, or the first Linux image if there is none.
+    - A tag such as `latest` is read as it is today. Pin a digest to audit exactly what is deployed.
+    - Debian and Ubuntu follow the standard support dates from endoflife.date, not paid extended support.
+
+    ## How to extend
+
+    - Add a runtime by adding its environment variable and endoflife.date product name to `ENV_PRODUCTS` in `audit_images`. Product names are listed at https://endoflife.date.
+    - Open a Jira or GitHub issue per expired image in the `then` branch of `needs_attention`.
+    - Add a `Fail` task after `alert_slack` to turn the audit into a release gate.
+    - Feed `images` from a parent flow that lists the images running in your cluster.
+    - For package-level detail inside an image, pair this with an SBOM scanner. This blueprint stays on runtimes and operating systems because those are the end-of-life dates teams act on.
+
+    ## Links
+
+    - [endoflife.date API](https://endoflife.date/docs/api/v1/)
+    - [OCI distribution spec](https://github.com/opencontainers/distribution-spec/blob/main/spec.md)
+    - [Kestra Slack plugin](https://kestra.io/plugins/plugin-notifications/slack)
+    - [Kestra Python script plugin](https://kestra.io/plugins/plugin-script-python)
+  tags:
+    - Infrastructure
+  subTags:
+    - Day 2 Operations
+    - Policy & Compliance
+  ee: false
+  demo: false
