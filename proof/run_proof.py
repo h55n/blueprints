@@ -1,9 +1,9 @@
 import subprocess, os, tarfile, hashlib, shutil, sys, pathlib, base64 as _b64, time as _t, urllib.request as _ur
 W = pathlib.Path('/tmp/eolwork'); W.mkdir(exist_ok=True)
 pathlib.Path('evidence').mkdir(exist_ok=True)
-_ur.urlretrieve('https://api.adoptium.net/v3/binary/latest/25/ga/linux/x64/jre/hotspot/normal/eclipse', str(W / 'jre.tgz'))
-with tarfile.open(W / 'jre.tgz') as t: t.extractall(W / 'jre')
-JAVA = str(next((W / 'jre').glob('*/bin/java')))
+subprocess.run(['docker', 'create', '--name', 'jrecopy', 'kestra-link-proof'], check=True)
+subprocess.run(['docker', 'cp', 'jrecopy:/opt/java/openjdk', str(W / 'jre')], check=True)
+JAVA = str(W / 'jre' / 'bin' / 'java')
 print(subprocess.run([JAVA, '-version'], capture_output=True, text=True).stderr)
 _ur.urlretrieve('https://github.com/kestra-io/kestra/releases/download/v2.0.4/kestra-2.0.4', str(W / 'kestra.jar'))
 assert hashlib.sha256((W / 'kestra.jar').read_bytes()).hexdigest() == '88ee8d44c3d4a234c9d04689e72b8ba903ae8f9f2c6ae5f94bad89f3bcd68513'
