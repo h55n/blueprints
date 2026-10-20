@@ -1,0 +1,117 @@
+name: eol audit docker test (fork only)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [eol-audit-docker-test]
+
+jobs:
+  run-flow:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - name: Start Kestra
+        run: |
+          curl -sL -o kestra https://github.com/kestra-io/kestra/releases/download/v2.0.6/kestra-2.0.6
+          chmod +x kestra
+          mkdir -p kdata
+          cat > kconf.yml <<'CONF'
+          kestra:
+            server:
+              basic-auth:
+                username: admin@kestra.io
+                password: Kestra12345
+            repository:
+              type: h2
+            queue:
+              type: h2
+            storage:
+              type: local
+              local:
+                base-path: /tmp/kstorage
+          micronaut:
+            server:
+              port: 8089
+          CONF
+          nohup ./kestra server local --config kconf.yml > kestra.log 2>&1 &
+          for i in $(seq 1 60); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' -u admin@kestra.io:Kestra12345 http://localhost:8089/api/v1/main/flows/search || true)
+            [ "$code" = "200" ] && break
+            sleep 5
+          done
+          echo "api status: $code"
+
+      - name: Validate the shipped flow
+        run: |
+          python3 - <<'PY'
+          import yaml
+          d = yaml.safe_load(open("flows/container-image-os-eol-audit.yaml"))
+          d.pop("extend", None)
+          open("/tmp/shipped.yaml", "w").write(yaml.safe_dump(d, sort_keys=False))
+          PY
+          out=$(curl -s -u admin@kestra.io:Kestra12345 -X POST http://localhost:8089/api/v1/main/flows/validate -H 'Content-Type: application/x-yaml' --data-binary @/tmp/shipped.yaml)
+          echo "$out"
+          echo "$out" | python3 -c "import json,sys; r=json.load(sys.stdin); assert all(not x.get('constraints') for x in r), r"
+
+      - name: Run the flow against real images
+        run: |
+          python3 - <<'PY'
+          import re
+          s = open("flows/container-image-os-eol-audit.yaml").read()
+          s = s[: s.index("\nextend:")]
+          s = s.replace("namespace: company.team", "namespace: test")
+          # only change: the Slack webhook tasks become log tasks, because there is no webhook in CI
+          s = re.sub(
+              r"type: io\.kestra\.plugin\.slack\.notifications\.SlackIncomingWebhook\n(\s+)url: .*\n\s+payload: \|\n(?:.*\n){3}",
+              lambda m: "type: io.kestra.plugin.core.log.Log\n" + m.group(1) + 'message: "ALERT {{ outputs.classify.vars.summary }}"\n',
+              s,
+          )
+          open("/tmp/test-flow.yaml", "w").write(s)
+          PY
+          curl -s -u admin@kestra.io:Kestra12345 -X POST http://localhost:8089/api/v1/main/flows -H 'Content-Type: application/x-yaml' --data-binary @/tmp/test-flow.yaml | head -c 200; echo
+          E=$(curl -s -u admin@kestra.io:Kestra12345 -X POST http://localhost:8089/api/v1/main/executions/test/container-image-os-eol-audit \
+            -F 'images=["debian:10","alpine:3.19","ubuntu:24.04","gcr.io/distroless/static-debian12","python:3.12-slim"]' -F warn_days=90 | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
+          echo "execution $E"
+          for i in $(seq 1 90); do
+            st=$(curl -s -u admin@kestra.io:Kestra12345 http://localhost:8089/api/v1/main/executions/$E | python3 -c "import json,sys; print(json.load(sys.stdin)['state']['current'])")
+            case "$st" in SUCCESS|FAILED|WARNING|KILLED|CANCELLED) break;; esac
+            sleep 10
+          done
+          echo "final state: $st"
+          curl -s -u admin@kestra.io:Kestra12345 "http://localhost:8089/api/v1/main/logs/$E?minLevel=INFO" > /tmp/logs.json
+          python3 - <<'PY'
+          import json
+          logs = json.load(open("/tmp/logs.json"))
+          for l in logs:
+              print(l.get("taskId"), l.get("level"), str(l.get("message"))[:600])
+          alert = [l["message"] for l in logs if l.get("taskId") == "alert_slack"]
+          assert alert, "no alert was produced"
+          msg = alert[0]
+          print("\nALERT TEXT:", msg)
+          assert "debian:10" in msg and "Past end of life" in msg, "debian:10 should be past end of life"
+          assert "alpine:3.19" in msg, "alpine:3.19 should be flagged (past end of life)"
+          assert "distroless" in msg and "could not read os-release" in msg, "distroless image should be reported as could not check"
+          assert "ubuntu:24.04" not in msg, "ubuntu:24.04 should be supported and not alerted"
+          assert "python:3.12-slim" not in msg, "python:3.12-slim (Debian 12) should be supported and not alerted"
+          print("ALL ASSERTIONS PASSED")
+          PY
+          test "$st" = "SUCCESS"
+
+      - name: Kestra log
+        if: always()
+        run: tail -n 80 kestra.log || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eol-audit-logs
+          path: |
+            /tmp/logs.json
+            kestra.log
