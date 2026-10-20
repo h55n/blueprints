@@ -93,6 +93,9 @@ jobs:
           nohup python3 doh.py > doh.log 2>&1 &
           sleep 1
           mkdir -p /tmp/ca && cat /etc/ssl/certs/ca-certificates.crt ca.crt > /tmp/ca/ca.crt && chmod 644 /tmp/ca/ca.crt
+          docker pull -q python
+          printf 'FROM python\nCOPY ca.crt /usr/local/share/ca-certificates/test-ca.crt\nRUN update-ca-certificates\n' > Dockerfile.ca
+          docker build -q -f Dockerfile.ca -t python .
 
       - name: Start Kestra
         run: |
@@ -113,17 +116,6 @@ jobs:
               type: local
               local:
                 base-path: /tmp/kstorage
-            plugins:
-              defaults:
-                - type: io.kestra.plugin.scripts.python.Script
-                  forced: true
-                  values:
-                    env:
-                      SSL_CERT_FILE: /ca.crt
-                    taskRunner:
-                      type: io.kestra.plugin.scripts.runner.docker.Docker
-                      networkMode: host
-                      volumes: ["/tmp/ca/ca.crt:/ca.crt:ro"]
             tasks:
               scripts:
                 docker:
