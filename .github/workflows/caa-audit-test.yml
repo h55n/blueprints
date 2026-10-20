@@ -93,9 +93,9 @@ jobs:
           nohup python3 doh.py > doh.log 2>&1 &
           sleep 1
           mkdir -p /tmp/ca && cat /etc/ssl/certs/ca-certificates.crt ca.crt > /tmp/ca/ca.crt && chmod 644 /tmp/ca/ca.crt
-          docker pull -q python
-          printf 'FROM python\nCOPY ca.crt /usr/local/share/ca-certificates/test-ca.crt\nRUN update-ca-certificates\n' > Dockerfile.ca
-          docker build -q -f Dockerfile.ca -t python .
+          docker pull -q python:3.12-slim
+          printf 'FROM python:3.12-slim\nCOPY ca.crt /usr/local/share/ca-certificates/test-ca.crt\nRUN update-ca-certificates\n' > Dockerfile.ca
+          docker build -q -f Dockerfile.ca -t python:3.12-slim .
 
       - name: Start Kestra
         run: |
