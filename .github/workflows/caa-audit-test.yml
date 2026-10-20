@@ -115,15 +115,16 @@ jobs:
               local:
                 base-path: /tmp/kstorage
             plugins:
-              configurations:
-                - type: io.kestra.plugin.scripts.runner.docker.Docker
-                  values:
-                    volumes: ["/tmp/ca/ca.crt:/ca.crt:ro"]
-                    networkMode: host
+              defaults:
                 - type: io.kestra.plugin.scripts.python.Script
+                  forced: true
                   values:
                     env:
                       SSL_CERT_FILE: /ca.crt
+                    taskRunner:
+                      type: io.kestra.plugin.scripts.runner.docker.Docker
+                      networkMode: host
+                      volumes: ["/tmp/ca/ca.crt:/ca.crt:ro"]
             tasks:
               scripts:
                 docker:
