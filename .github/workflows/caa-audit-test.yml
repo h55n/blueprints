@@ -1,0 +1,198 @@
+name: caa audit test (fork only)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [caa-audit-test]
+
+jobs:
+  run-flow:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - name: Mock Slack webhook
+        run: |
+          cat > /tmp/mocks.py <<'PY'
+          import json, sys, threading
+          from http.server import BaseHTTPRequestHandler, HTTPServer
+          from urllib.parse import urlparse, parse_qs
+
+          class Slack(BaseHTTPRequestHandler):
+              def do_POST(self):
+                  body = self.rfile.read(int(self.headers.get("content-length", 0))).decode()
+                  open("/tmp/slack.log", "a").write(body + "\n")
+                  self.send_response(200); self.end_headers(); self.wfile.write(b"ok")
+              def log_message(self, *a): pass
+
+          ANSWERS = {
+              "dangling.test.example": {"Status": 3, "Answer": [{"name": "dangling.test.example.", "type": 5, "data": "gone.test.invalid."}]},
+              "fine.test.example": {"Status": 0, "Answer": [{"name": "fine.test.example.", "type": 5, "data": "target.test.example."}, {"name": "target.test.example.", "type": 1, "data": "192.0.2.10"}]},
+          }
+
+          class Doh(BaseHTTPRequestHandler):
+              def do_GET(self):
+                  name = parse_qs(urlparse(self.path).query)["name"][0]
+                  self.send_response(200); self.send_header("content-type", "application/dns-json"); self.end_headers()
+                  self.wfile.write(json.dumps(ANSWERS.get(name, {"Status": 3})).encode())
+              def log_message(self, *a): pass
+
+          threading.Thread(target=HTTPServer(("0.0.0.0", 9999), Slack).serve_forever, daemon=True).start()
+          HTTPServer(("0.0.0.0", 9998), Doh).serve_forever()
+          PY
+          : > /tmp/slack.log
+          nohup python3 /tmp/mocks.py > /tmp/mocks.log 2>&1 &
+          sleep 2
+
+      - name: Start Kestra
+        run: |
+          curl -sL -o kestra https://github.com/kestra-io/kestra/releases/download/v2.0.6/kestra-2.0.6
+          chmod +x kestra
+          mkdir -p kdata
+          cat > kconf.yml <<'CONF'
+          kestra:
+            server:
+              basic-auth:
+                username: admin@kestra.io
+                password: Kestra12345
+            repository:
+              type: h2
+            queue:
+              type: h2
+            storage:
+              type: local
+              local:
+                base-path: /tmp/kstorage
+          micronaut:
+            server:
+              port: 8089
+          CONF
+          export SECRET_SLACK_WEBHOOK_URL=$(printf %s "http://localhost:9999/hook" | base64 -w0)
+          nohup ./kestra server local --config kconf.yml > kestra.log 2>&1 &
+          for i in $(seq 1 60); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' -u admin@kestra.io:Kestra12345 http://localhost:8089/api/v1/main/flows/search || true)
+            [ "$code" = "200" ] && break
+            sleep 5
+          done
+          echo "api status: $code"
+
+      - name: Validate the shipped flow
+        run: |
+          python3 - <<'PY'
+          s = open("flows/caa-and-certificate-issuer-audit.yaml").read()
+          open("/tmp/shipped.yaml", "w").write(s[: s.index("\nextend:")].replace("namespace: company.team", "namespace: test"))
+          PY
+          out=$(curl -s -u admin@kestra.io:Kestra12345 -X POST http://localhost:8089/api/v1/main/flows/validate -H 'Content-Type: application/x-yaml' --data-binary @/tmp/shipped.yaml)
+          echo "$out"
+          echo "$out" | python3 -c "import json,sys; r=json.load(sys.stdin); assert all(not x.get('constraints') for x in r), r"
+          curl -s -u admin@kestra.io:Kestra12345 -X POST http://localhost:8089/api/v1/main/flows -H 'Content-Type: application/x-yaml' --data-binary @/tmp/shipped.yaml | head -c 200; echo
+
+      - name: Run the unmodified flow (real Slack task posts to the mock webhook)
+        run: |
+          run_flow() {
+            : > /tmp/slack.log
+            E=$(curl -s -u admin@kestra.io:Kestra12345 -X POST http://localhost:8089/api/v1/main/executions/test/caa-and-certificate-issuer-audit "$@" | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
+            echo "execution $E"
+            for i in $(seq 1 90); do
+              st=$(curl -s -u admin@kestra.io:Kestra12345 http://localhost:8089/api/v1/main/executions/$E | python3 -c "import json,sys; print(json.load(sys.stdin)['state']['current'])")
+              case "$st" in SUCCESS|FAILED|WARNING|KILLED|CANCELLED) break;; esac
+              sleep 10
+            done
+            echo "final state: $st"
+            test "$st" = "SUCCESS"
+            echo "--- Slack payload received:"; cat /tmp/slack.log
+          }
+          run_flow -F 'domains=["github.com","google.com","example.com"]' -F 'approved_issuers=["Google Trust Services"]'
+          cp /tmp/slack.log /tmp/slack-run1.log
+          run_flow -F 'domains=["google.com"]' -F 'approved_issuers=["Google Trust Services"]'
+          cp /tmp/slack.log /tmp/slack-run2.log
+
+      - name: CAA mismatch branch with a local TLS server and mock resolver
+        run: |
+          set -e
+          # local CA whose certificates say "Sectigo Test CA", and a leaf for caa-mismatch.test
+          openssl req -x509 -newkey rsa:2048 -nodes -keyout ca.key -out ca.crt -days 2 -subj "/O=Sectigo Test CA/CN=Test Root"
+          openssl req -newkey rsa:2048 -nodes -keyout leaf.key -out leaf.csr -subj "/CN=caa-mismatch.test"
+          printf "subjectAltName=DNS:caa-mismatch.test" > san.ext
+          openssl x509 -req -in leaf.csr -CA ca.crt -CAkey ca.key -CAcreateserial -out leaf.crt -days 2 -extfile san.ext
+          echo "127.0.0.1 caa-mismatch.test" | sudo tee -a /etc/hosts
+          cat > tlsserver.py <<'PY'
+          import socket, ssl
+          ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+          ctx.load_cert_chain("leaf.crt", "leaf.key")
+          srv = socket.socket(); srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+          srv.bind(("127.0.0.1", 443)); srv.listen(5)
+          while True:
+              c, _ = srv.accept()
+              try:
+                  ctx.wrap_socket(c, server_side=True).close()
+              except Exception:
+                  c.close()
+          PY
+          sudo nohup python3 tlsserver.py > tls.log 2>&1 &
+          sleep 2
+          cat > doh.py <<'PY'
+          import json
+          from http.server import BaseHTTPRequestHandler, HTTPServer
+          from urllib.parse import urlparse, parse_qs
+          class H(BaseHTTPRequestHandler):
+              def do_GET(self):
+                  name = parse_qs(urlparse(self.path).query)["name"][0]
+                  if name == "caa-mismatch.test":
+                      ans = {"Status": 0, "Answer": [{"name": name + ".", "type": 257, "data": '0 issue "letsencrypt.org"'}]}
+                  else:
+                      ans = {"Status": 0}
+                  self.send_response(200); self.send_header("content-type", "application/dns-json"); self.end_headers()
+                  self.wfile.write(json.dumps(ans).encode())
+              def log_message(self, *a): pass
+          HTTPServer(("127.0.0.1", 9997), H).serve_forever()
+          PY
+          nohup python3 doh.py > doh.log 2>&1 &
+          sleep 1
+          python3 - <<'PY'
+          import re, subprocess, sys, json, os
+          s = open("flows/caa-and-certificate-issuer-audit.yaml").read()
+          code = re.search(r"script: \|\n(.*?)\n\n  - id: needs_attention", s, re.S).group(1)
+          code = "\n".join(l[6:] for l in code.split("\n"))
+          code = code.replace("{{ inputs.domains | toJson }}", '["caa-mismatch.test"]').replace("{{ inputs.approved_issuers | default([]) | toJson }}", "[]").replace("{{ inputs.resolver_url }}", "http://127.0.0.1:9997/dns-query")
+          open("/tmp/caa_script.py", "w").write(code)
+          env = dict(os.environ, SSL_CERT_FILE=os.path.abspath("ca.crt"))
+          out = subprocess.run([sys.executable, "/tmp/caa_script.py"], capture_output=True, text=True, env=env)
+          print(out.stdout, out.stderr)
+          assert out.returncode == 0
+          line = [l for l in out.stdout.splitlines() if l.startswith("::")][0]
+          summary = json.loads(line.strip(":"))["outputs"]["summary"]
+          print("SUMMARY:", summary)
+          assert "caa-mismatch.test: served certificate is from Sectigo Test CA, which the CAA policy (letsencrypt.org) does not list" in summary
+          print("CAA MISMATCH BRANCH PASSED")
+          PY
+
+      - name: Assertions
+        run: |
+          python3 - <<'PY'
+          run1 = open("/tmp/slack-run1.log").read()
+          run2 = open("/tmp/slack-run2.log").read()
+          assert "github.com: issuer" in run1 and "not on the approved list" in run1
+          assert "example.com: no CAA record" in run1
+          assert "google.com" not in run1
+          assert run2.strip() == "", "google.com has a CAA that allows pki.goog and is on the approved list: no alert expected"
+          print("ALL ASSERTIONS PASSED")
+          PY
+
+      - name: Kestra log
+        if: always()
+        run: tail -n 80 kestra.log || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: logs
+          path: |
+            /tmp/slack.log
+            kestra.log
