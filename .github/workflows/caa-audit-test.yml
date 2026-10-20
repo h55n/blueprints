@@ -119,7 +119,7 @@ jobs:
                 - type: io.kestra.plugin.scripts.runner.docker.Docker
                   values:
                     volumes: ["/tmp/ca/ca.crt:/ca.crt:ro"]
-                    extraHosts: ["caa-mismatch.test:172.17.0.1"]
+                    networkMode: host
                 - type: io.kestra.plugin.scripts.python.Script
                   values:
                     env:
