@@ -1,0 +1,143 @@
+name: dangling cname audit test (fork only)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [cname-audit-test]
+
+jobs:
+  run-flow:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - name: Mock Slack webhook and mock DNS-over-HTTPS resolver
+        run: |
+          cat > /tmp/mocks.py <<'PY'
+          import json, sys, threading
+          from http.server import BaseHTTPRequestHandler, HTTPServer
+          from urllib.parse import urlparse, parse_qs
+
+          class Slack(BaseHTTPRequestHandler):
+              def do_POST(self):
+                  body = self.rfile.read(int(self.headers.get("content-length", 0))).decode()
+                  open("/tmp/slack.log", "a").write(body + "\n")
+                  self.send_response(200); self.end_headers(); self.wfile.write(b"ok")
+              def log_message(self, *a): pass
+
+          ANSWERS = {
+              "dangling.test.example": {"Status": 3, "Answer": [{"name": "dangling.test.example.", "type": 5, "data": "gone.test.invalid."}]},
+              "fine.test.example": {"Status": 0, "Answer": [{"name": "fine.test.example.", "type": 5, "data": "target.test.example."}, {"name": "target.test.example.", "type": 1, "data": "192.0.2.10"}]},
+          }
+
+          class Doh(BaseHTTPRequestHandler):
+              def do_GET(self):
+                  name = parse_qs(urlparse(self.path).query)["name"][0]
+                  self.send_response(200); self.send_header("content-type", "application/dns-json"); self.end_headers()
+                  self.wfile.write(json.dumps(ANSWERS.get(name, {"Status": 3})).encode())
+              def log_message(self, *a): pass
+
+          threading.Thread(target=HTTPServer(("0.0.0.0", 9999), Slack).serve_forever, daemon=True).start()
+          HTTPServer(("0.0.0.0", 9998), Doh).serve_forever()
+          PY
+          : > /tmp/slack.log
+          nohup python3 /tmp/mocks.py > /tmp/mocks.log 2>&1 &
+          sleep 2
+
+      - name: Start Kestra
+        run: |
+          curl -sL -o kestra https://github.com/kestra-io/kestra/releases/download/v2.0.6/kestra-2.0.6
+          chmod +x kestra
+          mkdir -p kdata
+          cat > kconf.yml <<'CONF'
+          kestra:
+            server:
+              basic-auth:
+                username: admin@kestra.io
+                password: Kestra12345
+            repository:
+              type: h2
+            queue:
+              type: h2
+            storage:
+              type: local
+              local:
+                base-path: /tmp/kstorage
+          micronaut:
+            server:
+              port: 8089
+          CONF
+          export SECRET_SLACK_WEBHOOK_URL=$(printf %s "http://localhost:9999/hook" | base64 -w0)
+          nohup ./kestra server local --config kconf.yml > kestra.log 2>&1 &
+          for i in $(seq 1 60); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' -u admin@kestra.io:Kestra12345 http://localhost:8089/api/v1/main/flows/search || true)
+            [ "$code" = "200" ] && break
+            sleep 5
+          done
+          echo "api status: $code"
+
+      - name: Validate the shipped flow
+        run: |
+          python3 - <<'PY'
+          s = open("flows/dangling-cname-takeover-audit.yaml").read()
+          open("/tmp/shipped.yaml", "w").write(s[: s.index("\nextend:")].replace("namespace: company.team", "namespace: test"))
+          PY
+          out=$(curl -s -u admin@kestra.io:Kestra12345 -X POST http://localhost:8089/api/v1/main/flows/validate -H 'Content-Type: application/x-yaml' --data-binary @/tmp/shipped.yaml)
+          echo "$out"
+          echo "$out" | python3 -c "import json,sys; r=json.load(sys.stdin); assert all(not x.get('constraints') for x in r), r"
+          curl -s -u admin@kestra.io:Kestra12345 -X POST http://localhost:8089/api/v1/main/flows -H 'Content-Type: application/x-yaml' --data-binary @/tmp/shipped.yaml | head -c 200; echo
+
+      - name: Run the unmodified flow (real Slack task posts to the mock webhook)
+        run: |
+          run_flow() {
+            : > /tmp/slack.log
+            E=$(curl -s -u admin@kestra.io:Kestra12345 -X POST http://localhost:8089/api/v1/main/executions/test/dangling-cname-takeover-audit "$@" | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
+            echo "execution $E"
+            for i in $(seq 1 90); do
+              st=$(curl -s -u admin@kestra.io:Kestra12345 http://localhost:8089/api/v1/main/executions/$E | python3 -c "import json,sys; print(json.load(sys.stdin)['state']['current'])")
+              case "$st" in SUCCESS|FAILED|WARNING|KILLED|CANCELLED) break;; esac
+              sleep 10
+            done
+            echo "final state: $st"
+            test "$st" = "SUCCESS"
+            echo "--- Slack payload received:"; cat /tmp/slack.log
+          }
+          run_flow -F 'hostnames=["h55n-nonexistent-xyz-7731.github.io","www.github.com","nosuchhost-7731.invalid"]'
+          cp /tmp/slack.log /tmp/slack-live.log
+          run_flow -F 'hostnames=["dangling.test.example","fine.test.example"]' -F 'resolver_url=http://172.17.0.1:9998/dns-query'
+          cp /tmp/slack.log /tmp/slack-dangling.log
+          run_flow -F 'hostnames=["fine.test.example"]' -F 'resolver_url=http://172.17.0.1:9998/dns-query'
+          cp /tmp/slack.log /tmp/slack-clean.log
+
+      - name: Assertions
+        run: |
+          python3 - <<'PY'
+          live = open("/tmp/slack-live.log").read()
+          dang = open("/tmp/slack-dangling.log").read()
+          clean = open("/tmp/slack-clean.log").read()
+          assert "h55n-nonexistent-xyz-7731.github.io: TAKEOVER RISK" in live
+          assert "www.github.com" not in live and "nosuchhost" not in live
+          assert "dangling.test.example: DANGLING" in dang and "gone.test.invalid" in dang
+          assert "fine.test.example" not in dang
+          assert clean.strip() == "", "no Slack message expected for a clean host"
+
+          print("ALL ASSERTIONS PASSED")
+          PY
+
+      - name: Kestra log
+        if: always()
+        run: tail -n 80 kestra.log || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: logs
+          path: |
+            /tmp/slack.log
+            kestra.log
