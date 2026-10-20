@@ -59,13 +59,12 @@ jobs:
           openssl req -newkey rsa:2048 -nodes -keyout leaf.key -out leaf.csr -subj "/CN=172-17-0-1.nip.io"
           printf "subjectAltName=DNS:172-17-0-1.nip.io" > san.ext
           openssl x509 -req -in leaf.csr -CA ca.crt -CAkey ca.key -CAcreateserial -out leaf.crt -days 2 -extfile san.ext
-          echo "127.0.0.1 172-17-0-1.nip.io" | sudo tee -a /etc/hosts
           cat > tlsserver.py <<'PY'
           import socket, ssl
           ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
           ctx.load_cert_chain("leaf.crt", "leaf.key")
           srv = socket.socket(); srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-          srv.bind(("127.0.0.1", 443)); srv.listen(5)
+          srv.bind(("0.0.0.0", 443)); srv.listen(5)
           while True:
               c, _ = srv.accept()
               try:
