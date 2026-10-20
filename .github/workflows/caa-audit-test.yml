@@ -27,8 +27,9 @@ jobs:
           class Slack(BaseHTTPRequestHandler):
               def do_POST(self):
                   body = self.rfile.read(int(self.headers.get("content-length", 0))).decode()
+                  ok = "json" in self.headers.get("content-type", "") and "text" in json.loads(body)
                   open("/tmp/slack.log", "a").write(body + "\n")
-                  self.send_response(200); self.end_headers(); self.wfile.write(b"ok")
+                  self.send_response(200 if ok else 400); self.end_headers(); self.wfile.write(b"ok" if ok else b"invalid_payload")
               def log_message(self, *a): pass
 
           ANSWERS = {
@@ -49,6 +50,50 @@ jobs:
           : > /tmp/slack.log
           nohup python3 /tmp/mocks.py > /tmp/mocks.log 2>&1 &
           sleep 2
+
+      - name: Local CA, TLS server and mock resolver for the CAA mismatch case
+        run: |
+          set -e
+          # local CA whose certificates say "Sectigo Test CA", and a leaf for caa-mismatch.test
+          openssl req -x509 -newkey rsa:2048 -nodes -keyout ca.key -out ca.crt -days 2 -subj "/O=Sectigo Test CA/CN=Test Root"
+          openssl req -newkey rsa:2048 -nodes -keyout leaf.key -out leaf.csr -subj "/CN=caa-mismatch.test"
+          printf "subjectAltName=DNS:caa-mismatch.test" > san.ext
+          openssl x509 -req -in leaf.csr -CA ca.crt -CAkey ca.key -CAcreateserial -out leaf.crt -days 2 -extfile san.ext
+          echo "127.0.0.1 caa-mismatch.test" | sudo tee -a /etc/hosts
+          cat > tlsserver.py <<'PY'
+          import socket, ssl
+          ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+          ctx.load_cert_chain("leaf.crt", "leaf.key")
+          srv = socket.socket(); srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+          srv.bind(("127.0.0.1", 443)); srv.listen(5)
+          while True:
+              c, _ = srv.accept()
+              try:
+                  ctx.wrap_socket(c, server_side=True).close()
+              except Exception:
+                  c.close()
+          PY
+          sudo nohup python3 tlsserver.py > tls.log 2>&1 &
+          sleep 2
+          cat > doh.py <<'PY'
+          import json
+          from http.server import BaseHTTPRequestHandler, HTTPServer
+          from urllib.parse import urlparse, parse_qs
+          class H(BaseHTTPRequestHandler):
+              def do_GET(self):
+                  name = parse_qs(urlparse(self.path).query)["name"][0]
+                  if name == "caa-mismatch.test":
+                      ans = {"Status": 0, "Answer": [{"name": name + ".", "type": 257, "data": '0 issue "letsencrypt.org"'}]}
+                  else:
+                      ans = {"Status": 0}
+                  self.send_response(200); self.send_header("content-type", "application/dns-json"); self.end_headers()
+                  self.wfile.write(json.dumps(ans).encode())
+              def log_message(self, *a): pass
+          HTTPServer(("0.0.0.0", 9997), H).serve_forever()
+          PY
+          nohup python3 doh.py > doh.log 2>&1 &
+          sleep 1
+          mkdir -p /tmp/ca && cat /etc/ssl/certs/ca-certificates.crt ca.crt > /tmp/ca/ca.crt && chmod 644 /tmp/ca/ca.crt
 
       - name: Start Kestra
         run: |
