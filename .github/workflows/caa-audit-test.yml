@@ -54,12 +54,12 @@ jobs:
       - name: Local CA, TLS server and mock resolver for the CAA mismatch case
         run: |
           set -e
-          # local CA whose certificates say "Sectigo Test CA", and a leaf for caa-mismatch.test
+          # local CA whose certificates say "Sectigo Test CA", and a leaf for 172-17-0-1.nip.io
           openssl req -x509 -newkey rsa:2048 -nodes -keyout ca.key -out ca.crt -days 2 -subj "/O=Sectigo Test CA/CN=Test Root"
-          openssl req -newkey rsa:2048 -nodes -keyout leaf.key -out leaf.csr -subj "/CN=caa-mismatch.test"
-          printf "subjectAltName=DNS:caa-mismatch.test" > san.ext
+          openssl req -newkey rsa:2048 -nodes -keyout leaf.key -out leaf.csr -subj "/CN=172-17-0-1.nip.io"
+          printf "subjectAltName=DNS:172-17-0-1.nip.io" > san.ext
           openssl x509 -req -in leaf.csr -CA ca.crt -CAkey ca.key -CAcreateserial -out leaf.crt -days 2 -extfile san.ext
-          echo "127.0.0.1 caa-mismatch.test" | sudo tee -a /etc/hosts
+          echo "127.0.0.1 172-17-0-1.nip.io" | sudo tee -a /etc/hosts
           cat > tlsserver.py <<'PY'
           import socket, ssl
           ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -82,7 +82,7 @@ jobs:
           class H(BaseHTTPRequestHandler):
               def do_GET(self):
                   name = parse_qs(urlparse(self.path).query)["name"][0]
-                  if name == "caa-mismatch.test":
+                  if name == "172-17-0-1.nip.io":
                       ans = {"Status": 0, "Answer": [{"name": name + ".", "type": 257, "data": '0 issue "letsencrypt.org"'}]}
                   else:
                       ans = {"Status": 0}
@@ -172,7 +172,7 @@ jobs:
           cp /tmp/slack.log /tmp/slack-run1.log
           run_flow -F 'domains=["google.com"]' -F 'approved_issuers=["Google Trust Services"]'
           cp /tmp/slack.log /tmp/slack-run2.log
-          run_flow -F 'domains=["caa-mismatch.test"]' -F 'resolver_url=http://172.17.0.1:9997/dns-query'
+          run_flow -F 'domains=["172-17-0-1.nip.io"]' -F 'resolver_url=http://172.17.0.1:9997/dns-query'
           cp /tmp/slack.log /tmp/slack-mismatch.log
 
       - name: Assertions
@@ -184,7 +184,7 @@ jobs:
           assert "example.com: no CAA record" in run1
           assert "google.com" not in run1
           mism = open("/tmp/slack-mismatch.log").read()
-          assert "caa-mismatch.test: served certificate is from Sectigo Test CA, which the CAA policy (letsencrypt.org) does not list" in mism
+          assert "172-17-0-1.nip.io: served certificate is from Sectigo Test CA, which the CAA policy (letsencrypt.org) does not list" in mism
           assert run2.strip() == "", "google.com has a CAA that allows pki.goog and is on the approved list: no alert expected"
           print("ALL ASSERTIONS PASSED")
           PY
