@@ -145,7 +145,7 @@ tasks:
     fetchType: FETCH_ONE
   - id: create_if_absent
     type: io.kestra.plugin.core.flow.If
-    condition: '{{ outputs.find_issue.total == 0 }}'
+    condition: '{{ outputs.find_issue.size == 0 }}'
     then:
     - id: open_remediation
       type: io.kestra.plugin.github.issues.Create
