@@ -50,8 +50,13 @@ Path('/tmp/dns-mode').write_text('missing')
 x=run();assert x['consecutive']==1,x
 # Existing GitHub issue prevents creation after threshold.
 x=run();assert len(issues())==1,x
-# A GitHub API failure must not save a delivery marker. Use a second flow ID
-# and isolated namespace state key to exercise creation rather than search hit.
+# A failed create must not save either a new count or delivery marker.
+x=run('retry.fixture.test');assert x['consecutive']==1,x
+Path('/tmp/gh-fail').write_text('yes')
+run('retry.fixture.test',status='FAILED');assert len(issues())==1
+Path('/tmp/gh-fail').write_text('no')
+x=run('retry.fixture.test');assert x['eligible'] and len(issues())==2,x
+x=run('retry.fixture.test');assert not x['eligible'] and len(issues())==2,x
 # Unit suite covers resolver timeouts; real DNS fixtures cover SERVFAIL.
 x=run('nocname.fixture.test');assert x['status']=='NO_CNAME',x
 # Live public DNS, read-only and dry-run.

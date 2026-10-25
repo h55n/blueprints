@@ -69,7 +69,7 @@ jobs:
       - name: Run flow through Docker and assert effects
         run: |
           export DOCKER_BRIDGE=$(docker network inspect bridge --format '{{(index .IPAM.Config 0).Gateway}}')
-          sudo chmod 666 /tmp/dns-mode /tmp/gh-issues.json
+          sudo chmod 666 /tmp/dns-mode /tmp/gh-issues.json /tmp/gh-fail
           python .ci/cname/integration.py
       - name: Logs
         if: always()

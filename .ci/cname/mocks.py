@@ -1,6 +1,7 @@
 import json,threading,os
 from http.server import HTTPServer,BaseHTTPRequestHandler
 from pathlib import Path
+from urllib.parse import urlparse,parse_qs
 from dnslib import RR,QTYPE,RCODE,A,CNAME
 from dnslib.server import DNSServer,BaseResolver
 
@@ -34,11 +35,13 @@ issues=[]
 class GitHub(BaseHTTPRequestHandler):
     def do_GET(self):
         # No real GitHub calls or account tokens used in this harness.
-        payload={'total_count':len(issues),'incomplete_results':False,'items':issues}
+        query=parse_qs(urlparse(self.path).query).get('q',[''])[0]
+        matching=[i for i in issues if i['title'] in query]
+        payload={'total_count':len(matching),'incomplete_results':False,'items':matching}
         self.send_response(200);self.send_header('content-type','application/json');self.end_headers();self.wfile.write(json.dumps(payload).encode())
     def do_POST(self):
         data=json.loads(self.rfile.read(int(self.headers['content-length'])))
-        if Path('/tmp/gh-fail').exists():
+        if Path('/tmp/gh-fail').read_text().strip()=='yes':
             self.send_response(500);self.end_headers();return
         issue=dict(data,id=len(issues)+1,number=len(issues)+1,state='open',html_url='http://localhost:9998/fixture/1',url='http://localhost:9998/repos/test/dns/issues/1',user={'login':'fixture','id':1},created_at='2026-10-25T00:00:00Z',updated_at='2026-10-25T00:00:00Z')
         issues.append(issue)
@@ -48,5 +51,6 @@ class GitHub(BaseHTTPRequestHandler):
 
 Path('/tmp/dns-mode').write_text('missing')
 Path('/tmp/gh-issues.json').write_text('[]')
+Path('/tmp/gh-fail').write_text('no')
 DNSServer(DNS(),address=os.environ['DOCKER_BRIDGE'],port=53).start_thread()
 HTTPServer(('0.0.0.0',9998),GitHub).serve_forever()
