@@ -1,4 +1,4 @@
-import json,threading
+import json,threading,os
 from http.server import HTTPServer,BaseHTTPRequestHandler
 from pathlib import Path
 from dnslib import RR,QTYPE,RCODE,A,CNAME
@@ -48,5 +48,5 @@ class GitHub(BaseHTTPRequestHandler):
 
 Path('/tmp/dns-mode').write_text('missing')
 Path('/tmp/gh-issues.json').write_text('[]')
-DNSServer(DNS(),address='0.0.0.0',port=53).start_thread()
+DNSServer(DNS(),address=os.environ['DOCKER_BRIDGE'],port=53).start_thread()
 HTTPServer(('0.0.0.0',9998),GitHub).serve_forever()

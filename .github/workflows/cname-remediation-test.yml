@@ -33,7 +33,8 @@ jobs:
           pytest -q .ci/cname/test_probe.py
       - name: Start fixtures and real Kestra
         run: |
-          sudo env PYTHONPATH="$(python -c 'import sys; print(":".join(sys.path))')" "$(which python)" .ci/cname/mocks.py > /tmp/mocks.log 2>&1 &
+          export DOCKER_BRIDGE=$(docker network inspect bridge --format '{{(index .IPAM.Config 0).Gateway}}')
+          sudo env DOCKER_BRIDGE="$DOCKER_BRIDGE" PYTHONPATH="$(python -c 'import sys; print(":".join(sys.path))')" "$(which python)" .ci/cname/mocks.py > /tmp/mocks.log 2>&1 &
           sleep 2
           cat /tmp/mocks.log
           test -f /tmp/dns-mode
