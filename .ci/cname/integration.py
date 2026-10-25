@@ -11,7 +11,7 @@ Path('/tmp/tested-flow.yaml').write_text(yaml.safe_dump(flow,sort_keys=False))
 r=s.post(BASE+'/flows/validate',data=yaml.safe_dump(flow),headers={'Content-Type':'application/x-yaml'});r.raise_for_status()
 print('VALIDATION',r.text,flush=True)
 assert all(not x.get('constraints') for x in r.json()),r.text
-r=s.post(BASE+'/flows',data=yaml.safe_dump(flow),headers={'Content-Type':'application/x-yaml'});r.raise_for_status()
+r=s.post(BASE+'/flows',data=yaml.safe_dump(flow),headers={'Content-Type':'application/x-yaml'}); print('SAVED',r.status_code,r.text[:2000],flush=True);r.raise_for_status()
 bridge=os.environ['DOCKER_BRIDGE']
 results=[]
 def run(name='app.fixture.test',dry=False,status='SUCCESS',live=False):
@@ -27,9 +27,10 @@ def run(name='app.fixture.test',dry=False,status='SUCCESS',live=False):
     print('EXECUTION_KEYS',list(e), 'OUTPUTS',e.get('outputs'), flush=True)
     results.append({'id':eid,'hostname':name,'dry_run':dry,'status':status})
     if status != 'SUCCESS': return {}
-    o=s.get(BASE+'/executions/'+eid+'/outputs'); print('OUTPUT_ENDPOINT',o.status_code,o.text[:3000],flush=True); o.raise_for_status()
+    tid=next(t['id'] for t in e['taskRunList'] if t['taskId']=='inspect_dns')
+    o=s.get(BASE+'/outputs/tasks/'+eid+'/'+tid); print('OUTPUT_ENDPOINT',o.status_code,o.text[:3000],flush=True); o.raise_for_status()
     payload=o.json()
-    return payload.get('inspect_dns',{}).get('vars',{})
+    return payload.get('vars',{})
 def issues():return json.loads(Path('/tmp/gh-issues.json').read_text())
 # Dry run cannot increment the saved baseline.
 x=run(dry=True);assert x['consecutive']==1 and not issues(),x
