@@ -33,7 +33,7 @@ jobs:
           pytest -q .ci/cname/test_probe.py
       - name: Start fixtures and real Kestra
         run: |
-          sudo python .ci/cname/mocks.py > /tmp/mocks.log 2>&1 &
+          sudo "$(which python)" .ci/cname/mocks.py > /tmp/mocks.log 2>&1 &
           curl --fail -sL -o kestra https://github.com/kestra-io/kestra/releases/download/v2.0.7/kestra-2.0.7
           chmod +x kestra
           cat > kconf.yml <<'CONF'
