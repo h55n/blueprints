@@ -24,8 +24,12 @@ def run(name='app.fixture.test',dry=False,status='SUCCESS',live=False):
     Path('/tmp/execution-'+eid+'.json').write_text(json.dumps(e,indent=2))
     print('RUN',name,dry,eid,e['state']['current'],flush=True)
     assert e['state']['current']==status,e
+    print('EXECUTION_KEYS',list(e), 'OUTPUTS',e.get('outputs'), flush=True)
     results.append({'id':eid,'hostname':name,'dry_run':dry,'status':status})
-    return e.get('outputs',{}).get('inspect_dns',{}).get('vars',{})
+    if status != 'SUCCESS': return {}
+    o=s.get(BASE+'/executions/'+eid+'/outputs'); print('OUTPUT_ENDPOINT',o.status_code,o.text[:3000],flush=True); o.raise_for_status()
+    payload=o.json()
+    return payload.get('inspect_dns',{}).get('vars',{})
 def issues():return json.loads(Path('/tmp/gh-issues.json').read_text())
 # Dry run cannot increment the saved baseline.
 x=run(dry=True);assert x['consecutive']==1 and not issues(),x
