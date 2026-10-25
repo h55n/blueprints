@@ -1,0 +1,83 @@
+name: CNAME remediation real Kestra test (fork only)
+on:
+  push:
+    branches: [cname-remediation-test]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+      - name: Install test dependencies
+        run: pip install pyyaml requests dnslib dnspython==2.8.0 kestra==2.0.0 pytest
+      - name: Unit cases and metadata checks
+        run: |
+          python - <<'PY'
+          import yaml,pathlib
+          f=yaml.safe_load(pathlib.Path('flows/dangling-cname-remediation-ticket.yaml').read_text())
+          pathlib.Path('/tmp/cname_probe.py').write_text(f['tasks'][1]['script'])
+          assert len(f['extend']['metaDescription'])<=160
+          assert f['id'] == 'dangling-cname-remediation-ticket'
+          assert f['extend']['ee'] is False and f['extend']['demo'] is False
+          assert len(f['extend']['tags'])<=3
+          for h in ['How it works','What you get',"Who it's for",'Why orchestrate this with Kestra','Prerequisites','Quick start','How to extend','Links']:
+              assert '## '+h in f['extend']['description'],h
+          PY
+          pytest -q .ci/cname/test_probe.py
+      - name: Start fixtures and real Kestra
+        run: |
+          sudo python .ci/cname/mocks.py > /tmp/mocks.log 2>&1 &
+          curl --fail -sL -o kestra https://github.com/kestra-io/kestra/releases/download/v2.0.7/kestra-2.0.7
+          chmod +x kestra
+          cat > kconf.yml <<'CONF'
+          kestra:
+            server:
+              basic-auth:
+                username: admin@kestra.io
+                password: Kestra12345
+            repository:
+              type: h2
+            queue:
+              type: h2
+            storage:
+              type: local
+              local:
+                base-path: /tmp/kstorage
+          micronaut:
+            server:
+              port: 8089
+          CONF
+          export SECRET_GITHUB_TOKEN=$(printf %s 'fixture-only-not-a-real-token' | base64 -w0)
+          nohup ./kestra server local --config kconf.yml > /tmp/kestra.log 2>&1 &
+          for i in $(seq 1 60); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' -u admin@kestra.io:Kestra12345 http://localhost:8089/api/v1/main/flows/search || true)
+            [ "$code" = "200" ] && break
+            sleep 5
+          done
+          test "$code" = "200"
+      - name: Run flow through Docker and assert effects
+        run: |
+          export DOCKER_BRIDGE=$(docker network inspect bridge --format '{{(index .IPAM.Config 0).Gateway}}')
+          sudo chmod 666 /tmp/dns-mode /tmp/gh-issues.json
+          python .ci/cname/integration.py
+      - name: Logs
+        if: always()
+        run: tail -80 /tmp/kestra.log || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cname-remediation-proof
+          path: |
+            /tmp/kestra.log
+            /tmp/mocks.log
+            /tmp/gh-issues.json
+            /tmp/execution-*.json
+            /tmp/results.json
+            /tmp/tested-flow.yaml
