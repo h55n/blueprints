@@ -59,3 +59,11 @@ def test_bad_names(monkeypatch,name):
     with pytest.raises(ValueError):probe(monkeypatch,[],hostname=name)
 def test_bad_threshold(monkeypatch):
     with pytest.raises(ValueError):probe(monkeypatch,missing(),threshold=1)
+
+def test_combined_cname_and_nxdomain(monkeypatch):
+    import dns.message,dns.rrset
+    response=dns.message.make_response(dns.message.make_query('app.example.com','CNAME'))
+    response.answer.append(dns.rrset.from_text('app.example.com.',30,'IN','CNAME','retired.example.net.'))
+    error=dns.resolver.NXDOMAIN(qnames=[dns.name.from_text('app.example.com')],responses={dns.name.from_text('app.example.com'):response})
+    x=probe(monkeypatch,[('app.example.com','CNAME',error),('retired.example.net','A',dns.resolver.NXDOMAIN())])
+    assert x['status']=='NXDOMAIN' and x['target']=='retired.example.net'
