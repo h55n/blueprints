@@ -33,7 +33,10 @@ jobs:
           pytest -q .ci/cname/test_probe.py
       - name: Start fixtures and real Kestra
         run: |
-          sudo "$(which python)" .ci/cname/mocks.py > /tmp/mocks.log 2>&1 &
+          sudo env PYTHONPATH="$(python -c 'import sys; print(":".join(sys.path))')" "$(which python)" .ci/cname/mocks.py > /tmp/mocks.log 2>&1 &
+          sleep 2
+          cat /tmp/mocks.log
+          test -f /tmp/dns-mode
           curl --fail -sL -o kestra https://github.com/kestra-io/kestra/releases/download/v2.0.7/kestra-2.0.7
           chmod +x kestra
           cat > kconf.yml <<'CONF'
@@ -69,7 +72,9 @@ jobs:
           python .ci/cname/integration.py
       - name: Logs
         if: always()
-        run: tail -80 /tmp/kestra.log || true
+        run: |
+          cat /tmp/mocks.log || true
+          tail -80 /tmp/kestra.log || true
       - uses: actions/upload-artifact@v4
         if: always()
         with:
