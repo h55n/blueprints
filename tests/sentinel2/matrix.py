@@ -6,7 +6,13 @@ for i in range(30):
  except requests.RequestException:pass
  time.sleep(1)
 flow=pathlib.Path('flows/sentinel2-cloud-masked-ndvi-geotiff.yaml').read_text().split('\nextend:')[0]
-s.put(base+'/flows/company.team/sentinel2-cloud-masked-ndvi-geotiff',headers={'Content-Type':'application/x-yaml'},data=flow).raise_for_status()
+existing=s.get(base+'/flows/company.team/sentinel2-cloud-masked-ndvi-geotiff')
+if existing.status_code==404:
+ r=s.post(base+'/flows',headers={'Content-Type':'application/x-yaml'},data=flow)
+else:
+ existing.raise_for_status()
+ r=s.put(base+'/flows/company.team/sentinel2-cloud-masked-ndvi-geotiff',headers={'Content-Type':'application/x-yaml'},data=flow)
+r.raise_for_status()
 cases=[('normal',{},'SUCCESS'),('none',{'start_date':'2010-01-01','end_date':'2010-01-02'},'SUCCESS'),('cloudy',{'bbox':'[77.58,12.96,77.60,12.98]','max_cloud_pct':'80','min_valid_fraction':'.2'},'FAILED'),('bad_bbox',{'bbox':'[1,2,0,3]'},'FAILED'),('too_large',{'bbox':'[0,0,1,1]'},'FAILED'),('bad_dates',{'start_date':'2026-09-30','end_date':'2026-09-01'},'FAILED'),('bad_cloud',{'max_cloud_pct':'101'},'FAILED'),('bad_fraction',{'min_valid_fraction':'0'},'FAILED')]
 results=[]
 for name,over,expected in cases:
