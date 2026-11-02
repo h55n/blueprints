@@ -1,0 +1,78 @@
+name: ubuntu private execution proof (fork only)
+on:
+  push:
+    branches:
+      - test/ubuntu-index-gate-nov2
+permissions:
+  contents: read
+jobs:
+  proof:
+    if: github.repository == 'h55n/blueprints'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Provision pinned open-source runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install PyYAML==6.0.3 requests==2.32.5
+          mkdir -p "$RUNNER_TEMP/kestra/plugins" "$RUNNER_TEMP/proof"
+          curl --fail --location --max-time 180 https://github.com/kestra-io/kestra/releases/download/v2.0.5/kestra-2.0.5 -o "$RUNNER_TEMP/kestra/kestra"
+          echo "f15c20ee2df97142135e6095ed6684a7386f962b0b1f483bc5af5fcb67ead12a  $RUNNER_TEMP/kestra/kestra" | sha256sum -c -
+          java -jar "$RUNNER_TEMP/kestra/kestra" plugins install --plugins "$RUNNER_TEMP/kestra/plugins" io.kestra.plugin:plugin-script-python:1.18.5
+          echo "1591748cf2b3f85fbc7528811a76eb643ab2023b60c0c249b13b650c42306cbb  $RUNNER_TEMP/kestra/plugins/io_kestra_plugin__plugin-script-python__1_18_5.jar" | sha256sum -c -
+          cat > "$RUNNER_TEMP/kestra/config.yml" <<EOF
+          kestra:
+            repository:
+              type: h2
+            queue:
+              type: h2
+            storage:
+              type: local
+              local:
+                basePath: ${RUNNER_TEMP}/kestra/storage
+            server:
+              basicAuth:
+                enabled: false
+          datasources:
+            h2:
+              url: jdbc:h2:mem:kestra;DB_CLOSE_DELAY=-1
+              driverClassName: org.h2.Driver
+              username: sa
+              password: ''
+          micronaut:
+            server:
+              host: 127.0.0.1
+            security:
+              enabled: true
+              intercept-url-map:
+                - pattern: /**
+                  access:
+                    - isAnonymous()
+          EOF
+          sudo apt-get update -qq
+          sudo apt-get install --no-install-recommends -y ubuntu-keyring gpgv
+      - name: Run actual Kestra execution matrix
+        env:
+          PROOF_RUNTIME: ${{ runner.temp }}/kestra
+          PROOF_OUTPUT: ${{ runner.temp }}/proof
+        run: python .github/proof/runtime.py
+      - name: Retain proof and actual task artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ubuntu-execution-proof
+          retention-days: 7
+          path: |
+            ${{ runner.temp }}/proof
+            ${{ runner.temp }}/kestra/storage
