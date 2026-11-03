@@ -159,10 +159,6 @@ tasks:
       TARGET_INDEX: '{{ inputs.target_index }}'
     outputFiles:
     - promotion-receipt.json
-triggers:
-- id: release_approved
-  type: io.kestra.plugin.core.trigger.Webhook
-  key: '{{ secret(''WHEEL_PROMOTION_WEBHOOK_KEY'') }}'
 outputs:
 - id: receipt
   type: FILE
@@ -204,11 +200,10 @@ extend:
 
     ### Secrets
     - DEVPI_UPLOAD_USERNAME and DEVPI_UPLOAD_PASSWORD: destination upload credentials.
-    - WHEEL_PROMOTION_WEBHOOK_KEY: webhook access key. Callers must already be authorized to select the target and approved lock.
 
     ## Quick start
     1. Configure the existing index and secrets. Prepare the approved JSON lock outside this workflow.
-    2. Run manually with wheel, release_lock and target_index. Authorized release automation may provide the same inputs through the keyed webhook.
+    2. Run manually with wheel, release_lock and target_index. The operator must already be authorized to select the target and approved lock.
     3. Inspect the receipt and the registry. For any failed read-back, investigate before retrying; the upload may already exist.
 
     ## How to extend

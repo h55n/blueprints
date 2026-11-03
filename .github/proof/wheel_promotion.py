@@ -34,7 +34,12 @@ try:
   except requests.RequestException:time.sleep(1)
  else:raise RuntimeError('Kestra did not start')
  requests.put('http://127.0.0.1:3147/root/prod',json={'type':'stage','bases':[],'volatile':False},auth=('root','')).raise_for_status()
- original=yaml.safe_load(Path('flows/devpi-trusted-wheel-promotion.yaml').read_text());original.pop('extend');original.pop('triggers')
+ original=yaml.safe_load(Path('flows/devpi-trusted-wheel-promotion.yaml').read_text());meta=original.pop('extend')
+ assert set(meta)=={'title','metaTitle','shortDescription','metaDescription','description','tags','subTags','ee','demo'}
+ assert len(meta['metaDescription'])<=160 and meta['tags']==['Infrastructure'] and meta['subTags']==['CI/CD & Deployment'] and meta['ee'] is False and meta['demo'] is False
+ validation=call('/flows/validate',method='POST',data=yaml.safe_dump(original),headers={'Content-Type':'application/x-yaml'})
+ assert len(validation)==1 and not validation[0].get('constraints'),validation
+ print('FULL_FLOW_MODEL_VALIDATION_PASS',validation,flush=True)
  for name in ('verify','upload','readback'):
   task=next(t for t in original['tasks'][0]['tasks'] if t['id']==name)
   (root/(name+'.py')).write_text(task['script'])
