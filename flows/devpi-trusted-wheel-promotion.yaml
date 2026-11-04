@@ -65,7 +65,7 @@ tasks:
       Path('verification.json').write_text(json.dumps(lock, indent=2))
       print('Verified approved wheel:', filename)
     timeout: PT5M
-    containerImage: python:3.12.12-slim-bookworm@sha256:593bd06efe90efa80dc4eee3948be7c0fde4134606dd40d8dd8dbcade98e669c
+    containerImage: python@sha256:593bd06efe90efa80dc4eee3948be7c0fde4134606dd40d8dd8dbcade98e669c
   - id: upload_preflight
     type: io.kestra.plugin.scripts.python.Script
     taskRunner:
@@ -101,7 +101,7 @@ tasks:
       if config.get('type') != 'indexconfig' or config.get('result', {}).get('volatile') is not False:
           raise ValueError('Destination must be a non-volatile devpi index')
     timeout: PT5M
-    containerImage: python:3.12.12-slim-bookworm@sha256:593bd06efe90efa80dc4eee3948be7c0fde4134606dd40d8dd8dbcade98e669c
+    containerImage: python@sha256:593bd06efe90efa80dc4eee3948be7c0fde4134606dd40d8dd8dbcade98e669c
     env:
       TARGET_INDEX: '{{ inputs.target_index }}'
   - id: upload
@@ -114,7 +114,7 @@ tasks:
       TWINE_USERNAME: '{{ secret(''DEVPI_UPLOAD_USERNAME'') }}'
       TWINE_PASSWORD: '{{ secret(''DEVPI_UPLOAD_PASSWORD'') }}'
       TWINE_NON_INTERACTIVE: '1'
-    containerImage: python:3.12.12-slim-bookworm@sha256:593bd06efe90efa80dc4eee3948be7c0fde4134606dd40d8dd8dbcade98e669c
+    containerImage: python@sha256:593bd06efe90efa80dc4eee3948be7c0fde4134606dd40d8dd8dbcade98e669c
     beforeCommands:
     - python -m pip install --no-cache-dir twine==7.0.0
     commands:
@@ -164,7 +164,7 @@ tasks:
       TARGET_INDEX: '{{ inputs.target_index }}'
     outputFiles:
     - promotion-receipt.json
-    containerImage: python:3.12.12-slim-bookworm@sha256:593bd06efe90efa80dc4eee3948be7c0fde4134606dd40d8dd8dbcade98e669c
+    containerImage: python@sha256:593bd06efe90efa80dc4eee3948be7c0fde4134606dd40d8dd8dbcade98e669c
 outputs:
 - id: receipt
   type: FILE
