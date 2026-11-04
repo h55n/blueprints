@@ -84,7 +84,17 @@ try:
   logs=call('/logs/'+eid+'?minLevel=TRACE');(root/(case+'-execution.json')).write_text(json.dumps(ex,indent=2));(root/(case+'-logs.json')).write_text(json.dumps(logs,indent=2));expected='SUCCESS'if case in ('good','real-wheel')else'FAILED';row={'case':case,'id':eid,'state':ex['state']['current'],'expected':expected,'tasks':[(t['taskId'],t['state']['current'])for t in ex.get('taskRunList',[])]};results.append(row);print(row,flush=True)
   if row['state']!=expected:
    print(json.dumps(logs)[-6000:]);raise RuntimeError('unexpected outcome')
-  if case not in ('good','real-wheel'):assert requests.get('http://127.0.0.1:3147/root/'+('volatile4'if case=='volatile-index'else'prod')+'/demo-gate/'+version,headers={'Accept':'application/json'}).status_code==404
+  if case not in ('good','real-wheel'):
+   assert not any(t['taskId'] == 'upload' for t in ex.get('taskRunList', [])), 'rejected case reached upload'
+   reason={'hash-mismatch':'Candidate differs from the independently approved release lock','identity-mismatch':'Wheel metadata does not match approved release identity','volatile-index':'Destination must be a non-volatile devpi index','untrusted-adjacent-lock':'Candidate differs from the independently approved release lock'}.get(case)
+   if reason:assert any(reason in log.get('message','') for log in logs), (case, 'wrong failure cause')
+   else:assert all(t['taskId']=='promotion' for t in ex.get('taskRunList', [])), 'missing KV reached child task'
+   assert requests.get('http://127.0.0.1:3147/root/'+('volatile4'if case=='volatile-index'else'prod')+'/demo-gate/'+version,headers={'Accept':'application/json'}).status_code==404
+   print('REJECTION_CAUSE_AND_NO_UPLOAD_PASS',case,reason or 'missing KV rejected at WorkingDirectory',flush=True)
+  else:
+   assert any('Verified approved wheel:' in log.get('message','') for log in logs)
+   assert any('Registry read-back matches the approved SHA256' in log.get('message','') for log in logs)
+   print('VERIFIED_UPLOAD_AND_READBACK_PASS',case,flush=True)
  (root/'runtime-results.json').write_text(json.dumps(results,indent=2))
  subprocess.run([sys.executable, str(Path(__file__).with_name('wheel_promotion_adversarial.py'))],check=True)
 finally:
