@@ -26,6 +26,8 @@ jobs:
         run: |
           set -euo pipefail
           docker info
+          docker pull python:3.12.12-slim-bookworm
+          docker image inspect python:3.12.12-slim-bookworm --format '{{json .RepoDigests}}' | grep -F 'python@sha256:593bd06efe90efa80dc4eee3948be7c0fde4134606dd40d8dd8dbcade98e669c'
           python -m pip install PyYAML==6.0.3 requests==2.32.5 twine==7.0.0 devpi-server==6.21.0
           mkdir -p "$RUNNER_TEMP/kestra/plugins" "$RUNNER_TEMP/proof"
           curl --fail --location --max-time 180 https://github.com/kestra-io/kestra/releases/download/v2.0.5/kestra-2.0.5 -o "$RUNNER_TEMP/kestra/kestra"

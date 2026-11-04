@@ -48,7 +48,7 @@ try:
   # Only inject disposable registry credentials and its test CA. Production YAML retains secrets.
   upload=next(t for t in flow['tasks'][0]['tasks'] if t['id']=='upload');upload['env']['TWINE_USERNAME']='root';upload['env']['TWINE_PASSWORD']='';upload['env']['SSL_CERT_FILE']=str(cert);upload['env']['REQUESTS_CA_BUNDLE']=str(cert)
   # The registry is disposable localhost HTTPS. Only test CA, networking and credentials differ.
-  flow['tasks'][0]['inputFiles']['test-ca.pem']=cert.read_text()
+  flow['tasks'][0]['inputFiles']['test-ca.pem']=Path(ssl.get_default_verify_paths().cafile).read_text() + '\n' + cert.read_text()
   for task in flow['tasks'][0]['tasks']:
    task['taskRunner']['networkMode']='host'
    task.setdefault('env',{})['SSL_CERT_FILE']='test-ca.pem'

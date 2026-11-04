@@ -65,7 +65,7 @@ tasks:
       Path('verification.json').write_text(json.dumps(lock, indent=2))
       print('Verified approved wheel:', filename)
     timeout: PT5M
-    containerImage: python@sha256:593bd06efe90efa80dc4eee3948be7c0fde4134606dd40d8dd8dbcade98e669c
+    containerImage: python:3.12.12-slim-bookworm
   - id: upload_preflight
     type: io.kestra.plugin.scripts.python.Script
     taskRunner:
@@ -101,7 +101,7 @@ tasks:
       if config.get('type') != 'indexconfig' or config.get('result', {}).get('volatile') is not False:
           raise ValueError('Destination must be a non-volatile devpi index')
     timeout: PT5M
-    containerImage: python@sha256:593bd06efe90efa80dc4eee3948be7c0fde4134606dd40d8dd8dbcade98e669c
+    containerImage: python:3.12.12-slim-bookworm
     env:
       TARGET_INDEX: '{{ inputs.target_index }}'
   - id: upload
@@ -114,7 +114,7 @@ tasks:
       TWINE_USERNAME: '{{ secret(''DEVPI_UPLOAD_USERNAME'') }}'
       TWINE_PASSWORD: '{{ secret(''DEVPI_UPLOAD_PASSWORD'') }}'
       TWINE_NON_INTERACTIVE: '1'
-    containerImage: python@sha256:593bd06efe90efa80dc4eee3948be7c0fde4134606dd40d8dd8dbcade98e669c
+    containerImage: python:3.12.12-slim-bookworm
     beforeCommands:
     - python -m pip install --no-cache-dir twine==7.0.0
     commands:
@@ -164,7 +164,7 @@ tasks:
       TARGET_INDEX: '{{ inputs.target_index }}'
     outputFiles:
     - promotion-receipt.json
-    containerImage: python@sha256:593bd06efe90efa80dc4eee3948be7c0fde4134606dd40d8dd8dbcade98e669c
+    containerImage: python:3.12.12-slim-bookworm
 outputs:
 - id: receipt
   type: FILE
@@ -199,7 +199,7 @@ extend:
     Separate task states tie protected namespace approval evidence and upload to a registry receipt. Unlike the offline wheelhouse flow, this writes to a destination registry rather than creating an installation bundle.
 
     ## Prerequisites
-    - A Docker-enabled worker and the Python scripts plugin. Tasks use a digest-pinned Python 3.12.12 image; the upload task installs Twine 7.0.0 before running its commands. No worker Python or Twine installation is used.
+    - A Docker-enabled worker and the Python scripts plugin. Tasks use a version-pinned Python 3.12.12 slim-bookworm image; the upload task installs Twine 7.0.0 before running its commands. No worker Python or Twine installation is used.
     - An existing HTTPS devpi index with public read access, restricted upload access and volatile=false. No index or account is created by the flow.
     - A wheel no larger than 64 MiB. An approver must store a JSON object with filename, name, version and sha256 at the namespace KV key devpi.approved_release_lock. Restrict KV writes and flow edits to trusted release approvers; wheel submitters must not be able to replace that lock. The fixed key is not an execution input.
     - Trust in the configured registry, its TLS certificate and the operator-approved target. This verifies artifact identity, not malware safety or reproducibility.
