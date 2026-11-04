@@ -40,17 +40,21 @@ try:
  validation=call('/flows/validate',method='POST',data=yaml.safe_dump(original),headers={'Content-Type':'application/x-yaml'})
  assert len(validation)==1 and not validation[0].get('constraints'),validation
  print('FULL_FLOW_MODEL_VALIDATION_PASS',validation,flush=True)
- for name in ('verify','upload','readback'):
+ for name in ('verify','upload_preflight','readback'):
   task=next(t for t in original['tasks'][0]['tasks'] if t['id']==name)
   (root/(name+'.py')).write_text(task['script'])
- for case in ['good','real-wheel','hash-mismatch','identity-mismatch','volatile-index']:
+ for case in ['good','real-wheel','hash-mismatch','identity-mismatch','volatile-index','missing-lock','untrusted-adjacent-lock']:
   flow=copy.deepcopy(original);flow['id']='wheel-promotion-proof-'+case+'-'+str(int(time.time()))
   # Only inject disposable registry credentials and its test CA. Production YAML retains secrets.
-  upload=flow['tasks'][0]['tasks'][1];upload['env']['TWINE_USERNAME']='root';upload['env']['TWINE_PASSWORD']='';upload['env']['SSL_CERT_FILE']=str(cert);upload['env']['REQUESTS_CA_BUNDLE']=str(cert)
-  flow['tasks'][0]['tasks'][2]['env']['SSL_CERT_FILE']=str(cert)
-  for task in flow['tasks'][0]['tasks']:task.setdefault('env',{})['VIRTUAL_ENV']=str(Path(sys.prefix))
+  upload=next(t for t in flow['tasks'][0]['tasks'] if t['id']=='upload');upload['env']['TWINE_USERNAME']='root';upload['env']['TWINE_PASSWORD']='';upload['env']['SSL_CERT_FILE']=str(cert);upload['env']['REQUESTS_CA_BUNDLE']=str(cert)
+  # The registry is disposable localhost HTTPS. Only test CA, networking and credentials differ.
+  flow['tasks'][0]['inputFiles']['test-ca.pem']=cert.read_text()
+  for task in flow['tasks'][0]['tasks']:
+   task['taskRunner']['networkMode']='host'
+   task.setdefault('env',{})['SSL_CERT_FILE']='test-ca.pem'
+   task['env']['REQUESTS_CA_BUNDLE']='test-ca.pem'
   call('/flows',method='POST',data=yaml.safe_dump(flow),headers={'Content-Type':'application/x-yaml'})
-  version={'good':'3.0','hash-mismatch':'3.1','identity-mismatch':'3.2','volatile-index':'3.3','real-wheel':'25.0'}[case];filename=f'demo_gate-{version}-py3-none-any.whl';wheel=root/(case+'.whl')
+  version={'good':'3.0','hash-mismatch':'3.1','identity-mismatch':'3.2','volatile-index':'3.3','real-wheel':'25.0','missing-lock':'3.4','untrusted-adjacent-lock':'3.5'}[case];filename=f'demo_gate-{version}-py3-none-any.whl';wheel=root/(case+'.whl')
   with zipfile.ZipFile(wheel,'w')as z:
    z.writestr('demo_gate/__init__.py','VALUE = 1\n');z.writestr(f'demo_gate-{version}.dist-info/METADATA',f'Metadata-Version: 2.1\nName: demo-gate\nVersion: {version}\n');z.writestr(f'demo_gate-{version}.dist-info/WHEEL','Wheel-Version: 1.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n');z.writestr(f'demo_gate-{version}.dist-info/RECORD','')
   if case=='real-wheel':
@@ -58,7 +62,20 @@ try:
    assert hashlib.sha256(wheel.read_bytes()).hexdigest()=='29572ef2b1f17581046b3a2227d5c611fb25ec70ca1ba8554b24b0e69331a484'
   lock={'filename':filename,'name':'packaging'if case=='real-wheel'else'other'if case=='identity-mismatch'else'demo-gate','version':version,'sha256':('0'*64 if case=='hash-mismatch'else hashlib.sha256(wheel.read_bytes()).hexdigest())};lockpath=root/(case+'-lock.json');lockpath.write_text(json.dumps(lock));target='https://localhost:3148/root/prod'
   if case=='volatile-index':requests.put('http://127.0.0.1:3147/root/volatile4',json={'type':'stage','bases':[],'volatile':True},auth=('root','')).raise_for_status();target='https://localhost:3148/root/volatile4'
-  with wheel.open('rb')as w,lockpath.open('rb')as l:ex=call('/executions/company.release/'+flow['id'],method='POST',files={'wheel':(filename,w),'release_lock':('release-lock.json',l),'target_index':(None,target)})
+  kvurl=base+'/namespaces/company.release/kv/devpi.approved_release_lock'
+  if case=='missing-lock':
+   response=session.delete(kvurl,timeout=20)
+   assert response.status_code in (200,204,404),response.text
+  else:
+   response=session.put(kvurl,data=json.dumps(lock),headers={'Content-Type':'text/plain'},timeout=20);response.raise_for_status()
+  with wheel.open('rb')as w:
+   files={'wheel':(filename,w),'target_index':(None,target)}
+   if case=='untrusted-adjacent-lock':
+    # An extra adjacent upload cannot override the trusted KV lock.
+    trusted={**lock,'sha256':'0'*64}
+    response=session.put(kvurl,data=json.dumps(trusted),headers={'Content-Type':'text/plain'},timeout=20);response.raise_for_status()
+    files['release_lock']=('forged-lock.json',json.dumps(lock))
+   ex=call('/executions/company.release/'+flow['id'],method='POST',files=files)
   eid=ex['id'];deadline=time.monotonic()+100
   while time.monotonic()<deadline:
    ex=call('/executions/'+eid)
